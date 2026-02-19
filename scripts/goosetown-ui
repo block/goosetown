@@ -514,7 +514,7 @@ def main():
     wall_file = args.wall or find_wall_file()
     wall_id = ""
     if wall_file:
-        wall_id = Path(wall_file).stem.replace("wall-", "")
+        wall_id = Path(wall_file).stem.removeprefix("wall-")
         print(f"📜 Wall file: {wall_file}", file=sys.stderr)
     else:
         print("⚠️  No wall file found — will poll for it", file=sys.stderr)

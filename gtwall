@@ -358,7 +358,7 @@ USAGE
         shopt -s nullglob
         for f in "${WALLS_DIR}"/wall-*.log; do
             if [[ -f "$f" ]]; then
-                session=$(basename "$f" .log | sed 's/wall-//')
+                session=$(basename "$f" .log | sed 's/^wall-//')
                 lines=$(wc -l < "$f" | tr -d ' ')
                 if [[ "$session" == "$SESSION_ID" ]]; then
                     printf '  %s: %s messages (current)\n' "$session" "$lines"

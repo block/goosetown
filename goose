@@ -40,4 +40,4 @@ trap cleanup EXIT
 echo "🦆 Goosetown telepathy enabled: $TELEPATHY_FILE" >&2
 echo "🦆 Goosetown wall enabled: $WALL_FILE" >&2
 
-exec "$GOOSE_BIN" "$@"
+"$GOOSE_BIN" "$@"
