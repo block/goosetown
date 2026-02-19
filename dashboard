@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dashboard — Launch goosetown dashboard. Idempotent. Port on stdout, noise on stderr.
 #
-# Multi-instance safe: each goose instance (identified by GOOSE_SERVER__SECRET_KEY)
+# Multi-instance safe: each goose instance (identified by GOOSE_GTWALL_FILE)
 # gets its own dashboard. Instances never interfere with each other — no shared screen
 # names, no global pkill, no "stale session" replacement.
 set -euo pipefail
@@ -19,11 +19,13 @@ info() { echo "$*" >&2; }
 command -v uv &>/dev/null || die "uv not found. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
 
 # ── Instance identity ───────────────────────────────────────────────────────
-# GOOSE_SERVER__SECRET_KEY is a UUID unique per goose instance. The first 8 chars
-# (WALL_ID) already scope wall files and position dirs — we reuse it to scope
-# screen sessions and portfiles so multiple dashboards can coexist.
-[[ -n "${GOOSE_SERVER__SECRET_KEY:-}" ]] || die2 "GOOSE_SERVER__SECRET_KEY not set"
-WALL_ID="${GOOSE_SERVER__SECRET_KEY:0:8}"
+# GOOSE_GTWALL_FILE points to the wall file for this goose instance. Extract the
+# WALL_ID from the filename to scope screen sessions and portfiles so multiple
+# dashboards can coexist.
+[[ -n "${GOOSE_GTWALL_FILE:-}" ]] || die2 "GOOSE_GTWALL_FILE not set"
+# Sanitize to safe chars for screen session names and portfiles (must match gtwall's rules)
+WALL_ID=$(basename "$GOOSE_GTWALL_FILE" .log | sed 's/^wall-//' | tr -cd 'A-Za-z0-9_-')
+[[ -n "$WALL_ID" ]] || die2 "Could not derive WALL_ID from GOOSE_GTWALL_FILE"
 SCREEN_NAME="goosetown-ui-${WALL_ID}"
 PORTFILE="${WALLS_DIR}/dashboard-${WALL_ID}.port"
 
@@ -58,10 +60,8 @@ resolve_session() {
 
 # ── Wall resolution ─────────────────────────────────────────────────────────
 resolve_wall() {
-  local wall_file="${WALLS_DIR}/wall-${WALL_ID}.log"
-  mkdir -p "$WALLS_DIR"
-  touch "$wall_file"
-  echo "$wall_file"
+  # Use GOOSE_GTWALL_FILE directly - it's already set by the goose wrapper
+  echo "$GOOSE_GTWALL_FILE"
 }
 
 # ── Port helpers ────────────────────────────────────────────────────────────
@@ -197,7 +197,7 @@ Usage: ./dashboard [--stop|--status|--open|--help]
   --help      This message
 
 Multiple goose instances get separate dashboards (ports 4242-4300).
-Each instance is scoped by GOOSE_SERVER__SECRET_KEY.
+Each instance is scoped by GOOSE_GTWALL_FILE.
 
 Exit codes: 0=ok, 1=error/not-running, 2=config-error, 3=port-exhaustion, 4=startup-timeout
 EOF
