@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+# gtwall - goose Town Wall
+# Simple broadcast communication for delegates
+#
+# Usage:
+#   gtwall <id> "message"   - Post message and show new messages
+#   gtwall <id>             - Just show new messages (no post)
+#   gtwall --reset <id>     - Reset read position (see all messages)
+#   gtwall --clear          - Clear the wall (admin)
+#   gtwall --help           - Show help
+
+WALL_DIR="${GTWALL_DIR:-${HOME}/.goosetown}"
+WALLS_DIR="${WALL_DIR}/walls"
+
+# Use GOOSE_SERVER__SECRET_KEY as session ID - it's unique per goose session
+# and shared by orchestrator + all delegates automatically
+if [[ -n "${GOOSE_SERVER__SECRET_KEY:-}" ]]; then
+    # Use first 8 chars of the UUID for readability
+    SESSION_ID="${GOOSE_SERVER__SECRET_KEY:0:8}"
+else
+    # Fallback for non-goose usage
+    SESSION_ID="default"
+fi
+
+# Sanitize SESSION_ID to safe filesystem characters (alphanumeric, dash, underscore)
+SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9_-')
+if [[ -z "$SESSION_ID" ]]; then
+    SESSION_ID="default"
+fi
+
+WALL_FILE="${WALLS_DIR}/wall-${SESSION_ID}.log"
+POS_DIR="${WALLS_DIR}/positions-${SESSION_ID}"
+
+# Lock management - track if we hold the lock for cleanup
+LOCKFILE_HELD=""
+
+cleanup_lock() {
+    if [[ -n "$LOCKFILE_HELD" ]] && [[ -d "$LOCKFILE_HELD" ]]; then
+        rm -f "${LOCKFILE_HELD}/pid" "${LOCKFILE_HELD}/time" 2>/dev/null
+        rmdir "$LOCKFILE_HELD" 2>/dev/null || true
+        LOCKFILE_HELD=""
+    fi
+}
+trap cleanup_lock EXIT INT TERM
+
+# Ensure directories exist
+mkdir -p "$WALLS_DIR" "$POS_DIR"
+touch "$WALL_FILE"
+
+# --- ID Validation ---
+validate_id() {
+    local id="$1"
+    # Only allow alphanumeric, dash, underscore
+    if [[ ! "$id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo "Error: Invalid ID '$id'. Use only letters, numbers, dash, underscore." >&2
+        exit 1
+    fi
+    # Reject empty
+    if [[ -z "$id" ]]; then
+        echo "Error: ID cannot be empty." >&2
+        exit 1
+    fi
+}
+
+# --- Position Tracking ---
+get_last_line() {
+    local id="$1"
+    local pos_file="${POS_DIR}/${id}.pos"
+    if [[ -f "$pos_file" ]]; then
+        local pos
+        pos=$(cat "$pos_file")
+        # Validate it's a number, default to 0 if corrupted
+        if [[ "$pos" =~ ^[0-9]+$ ]]; then
+            echo "$pos"
+        else
+            echo "0"
+        fi
+    else
+        echo "0"
+    fi
+}
+
+save_last_line() {
+    local id="$1"
+    local line="$2"
+    printf '%s\n' "$line" > "${POS_DIR}/${id}.pos"
+}
+
+# --- Message Handling ---
+# Stale lock threshold in seconds
+LOCK_STALE_THRESHOLD=30
+
+is_lock_stale() {
+    local lockfile="$1"
+    local pid_file="${lockfile}/pid"
+    local time_file="${lockfile}/time"
+    
+    # If no PID file, assume stale (old format or corrupted)
+    if [[ ! -f "$pid_file" ]]; then
+        return 0
+    fi
+    
+    local holding_pid
+    holding_pid=$(cat "$pid_file" 2>/dev/null)
+    
+    # If PID is not running, lock is stale
+    if [[ -n "$holding_pid" ]] && ! kill -0 "$holding_pid" 2>/dev/null; then
+        return 0
+    fi
+    
+    # If lock is too old, consider it stale
+    if [[ -f "$time_file" ]]; then
+        local lock_time now_time age
+        lock_time=$(cat "$time_file" 2>/dev/null)
+        now_time=$(date +%s)
+        if [[ "$lock_time" =~ ^[0-9]+$ ]]; then
+            age=$((now_time - lock_time))
+            if [[ $age -gt $LOCK_STALE_THRESHOLD ]]; then
+                return 0
+            fi
+        fi
+    fi
+    
+    return 1
+}
+
+remove_stale_lock() {
+    local lockfile="$1"
+    rm -f "${lockfile}/pid" "${lockfile}/time" 2>/dev/null
+    rmdir "$lockfile" 2>/dev/null
+}
+
+# Acquire the wall lock. Returns 0 on success, 1 on failure.
+# Sets LOCKFILE_HELD for cleanup_lock() trap.
+acquire_lock() {
+    local lockfile="${WALL_FILE}.lock"
+    local max_wait=10
+    local waited=0
+    
+    # Try to acquire lock with stale detection
+    while ! mkdir "$lockfile" 2>/dev/null; do
+        # Check if existing lock is stale
+        if is_lock_stale "$lockfile"; then
+            remove_stale_lock "$lockfile"
+            continue  # Retry immediately
+        fi
+        
+        sleep 0.1
+        waited=$((waited + 1))
+        if [[ $waited -ge $((max_wait * 10)) ]]; then
+            # Timeout - check one more time for stale lock
+            if is_lock_stale "$lockfile"; then
+                remove_stale_lock "$lockfile"
+                continue
+            fi
+            # Give up
+            return 1
+        fi
+    done
+    
+    # We acquired the lock - record PID and time for stale detection
+    LOCKFILE_HELD="$lockfile"
+    printf '%s\n' "$$" > "${lockfile}/pid"
+    printf '%s\n' "$(date +%s)" > "${lockfile}/time"
+    return 0
+}
+
+# Release the wall lock
+release_lock() {
+    local lockfile="${WALL_FILE}.lock"
+    rm -f "${lockfile}/pid" "${lockfile}/time" 2>/dev/null
+    rmdir "$lockfile" 2>/dev/null || true
+    LOCKFILE_HELD=""
+}
+
+post_message() {
+    local id="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(date "+%H:%M:%S")
+    
+    # Escape newlines and pipes in message
+    # Format: timestamp|sender|message (pipes in message escaped as \|)
+    # On read, IFS='|' splits into 3 fields; bash assigns remainder to last var
+    local escaped
+    escaped=$(printf '%s' "$message" | tr '\n' ' ' | sed 's/|/\\|/g')
+    
+    if ! acquire_lock; then
+        echo "Warning: Could not acquire lock after 10s, message not posted" >&2
+        return 1
+    fi
+    
+    # Write the message (atomic for small writes on POSIX)
+    printf '%s|%s|%s\n' "$timestamp" "$id" "$escaped" >> "$WALL_FILE"
+    
+    release_lock
+}
+
+read_new_messages() {
+    local id="$1"
+    local last_line
+    local current_lines
+    
+    last_line=$(get_last_line "$id")
+    current_lines=$(wc -l < "$WALL_FILE" | tr -d ' ')
+    
+    # If there are new messages
+    if [[ "$current_lines" -gt "$last_line" ]]; then
+        local start=$((last_line + 1))
+        
+        # Output new messages in readable format
+        tail -n "+${start}" "$WALL_FILE" | while IFS='|' read -r timestamp sender message; do
+            # Unescape pipes
+            local clean_msg
+            clean_msg=$(printf '%s' "$message" | sed 's/\\|/|/g')
+            printf '[%s] <%s> %s\n' "$timestamp" "$sender" "$clean_msg"
+        done
+    fi
+    
+    # Update position
+    save_last_line "$id" "$current_lines"
+}
+
+# --- Help ---
+show_help() {
+    cat << 'EOF'
+gtwall - goose Town Wall (per-session)
+
+Usage:
+  gtwall <id> "message"   Post message and show new messages
+  gtwall <id>             Just show new messages (no post)
+  gtwall --reset <id>     Reset read position (see all messages)
+  gtwall --clear          Clear this session's wall
+  gtwall --status         Show wall stats
+  gtwall --list           List all session walls
+  gtwall --help           Show this help
+
+Examples:
+  gtwall orchestrator "Starting OAuth refactor"
+  gtwall worker-auth "Finished auth module"
+  gtwall reviewer-security
+
+ID Rules:
+  - Use only letters, numbers, dash (-), underscore (_)
+  - Good: worker-auth, researcher-github, reviewer-1
+  - Bad: ../hack, worker 1, my|id
+
+Session:
+EOF
+    printf '  Session ID: %s (from GOOSE_SERVER__SECRET_KEY)\n' "$SESSION_ID"
+    printf '  Wall:       %s\n' "$WALL_FILE"
+    printf '  Positions:  %s/\n' "$POS_DIR"
+}
+
+# --- Main ---
+case "${1:-}" in
+    --help|-h)
+        show_help
+        ;;
+    --clear)
+        if ! acquire_lock; then
+            echo "Error: Could not acquire lock. Wall not cleared." >&2
+            exit 1
+        fi
+        > "$WALL_FILE"
+        rm -f "${POS_DIR}"/*.pos 2>/dev/null || true
+        release_lock
+        echo "Wall cleared for session $SESSION_ID."
+        ;;
+
+    --reset)
+        if [[ -z "$2" ]]; then
+            echo "Usage: gtwall --reset <id>" >&2
+            exit 1
+        fi
+        validate_id "$2"
+        rm -f "${POS_DIR}/${2}.pos"
+        echo "Position reset for $2. Next read will show all messages."
+        ;;
+    --usage)
+        cat << 'USAGE'
+# gtwall — How to Use the Town Wall
+
+You are a delegate running in parallel with other agents. The Town Wall is your ONLY communication channel with them. **Use it aggressively.**
+
+## Your Cadence
+
+1. **Immediately on start:** Post what you're working on
+   ```
+   ./gtwall <your-id> "🎬 Starting: researching OAuth patterns in GitHub"
+   ```
+
+2. **Every 3-5 tool calls:** Read the wall for updates from sibling agents
+   ```
+   ./gtwall <your-id>
+   ```
+
+3. **When you discover something:** Post it NOW, not later. Your findings help other agents mid-flight.
+   ```
+   ./gtwall <your-id> "💡 Found: oauth2 crate v0.5 has breaking changes, use v0.4"
+   ```
+
+4. **When you hit a dead end or surprise:** Post immediately so others don't waste time on the same path
+   ```
+   ./gtwall <your-id> "⚠️ Reddit API rate limited — only got 3 results"
+   ```
+
+5. **When done:** Post your summary
+   ```
+   ./gtwall <your-id> "✅ Done. Key findings: 1) use PKCE flow 2) keyring for storage 3) port 8400 for redirect"
+   ```
+
+## Why This Matters
+
+Other agents are running RIGHT NOW exploring related questions. A researcher who posts "oauth2 crate is deprecated" mid-flight saves a parallel worker from building against a dead library. A worker who posts "claiming src/auth/mod.rs" prevents a file collision. **The earlier you post, the more you help.** A finding posted at the end of your run helps no one — by then, others have already made decisions without it.
+
+## Commands
+
+```
+./gtwall <your-id> "message"   # Post + read new messages
+./gtwall <your-id>             # Read only (no post)
+```
+
+## Wrap-Up Signals
+
+The orchestrator may post time warnings. Obey them:
+- ⏰ = 5 minutes left. Finish current thread, start summarizing.
+- 🚨 = Last call. STOP everything. Post bullet-point findings NOW.
+USAGE
+        ;;
+    --status)
+        total_lines=$(wc -l < "$WALL_FILE" | tr -d ' ')
+        printf 'Session: %s\n' "$SESSION_ID"
+        printf 'Wall: %s messages\n' "$total_lines"
+        echo "Positions:"
+        shopt -s nullglob
+        for f in "${POS_DIR}"/*.pos; do
+            if [[ -f "$f" ]]; then
+                id=$(basename "$f" .pos)
+                pos=$(cat "$f")
+                if [[ "$pos" =~ ^[0-9]+$ ]]; then
+                    unread=$((total_lines - pos))
+                else
+                    unread="?"
+                fi
+                printf '  %s: read %s, unread %s\n' "$id" "$pos" "$unread"
+            fi
+        done
+        shopt -u nullglob
+        ;;
+    --list)
+        echo "Session walls:"
+        shopt -s nullglob
+        for f in "${WALLS_DIR}"/wall-*.log; do
+            if [[ -f "$f" ]]; then
+                session=$(basename "$f" .log | sed 's/wall-//')
+                lines=$(wc -l < "$f" | tr -d ' ')
+                if [[ "$session" == "$SESSION_ID" ]]; then
+                    printf '  %s: %s messages (current)\n' "$session" "$lines"
+                else
+                    printf '  %s: %s messages\n' "$session" "$lines"
+                fi
+            fi
+        done
+        shopt -u nullglob
+        ;;
+    "")
+        echo "Usage: gtwall <id> [message]" >&2
+        echo "Run 'gtwall --help' for more info." >&2
+        exit 1
+        ;;
+    -*)
+        echo "Unknown option: $1" >&2
+        echo "Run 'gtwall --help' for more info." >&2
+        exit 1
+        ;;
+    *)
+        ID="$1"
+        validate_id "$ID"
+        shift
+        
+        if [[ $# -gt 0 ]]; then
+            # Post message and read
+            MESSAGE="$*"
+            # Don't allow empty messages
+            if [[ -z "${MESSAGE// /}" ]]; then
+                echo "Error: Message cannot be empty." >&2
+                exit 1
+            fi
+            post_message "$ID" "$MESSAGE"
+        fi
+        
+        # Always read new messages
+        read_new_messages "$ID"
+        ;;
+esac

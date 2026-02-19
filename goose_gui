@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Goosetown GUI launcher wrapper
+# Enables telepathy for the Goose desktop app when launched from terminal.
+# Note: Telepathy only works when launched via this script, not from Finder/Spotlight/Dock.
+#
+# Keep this terminal open while using Goose. Press Ctrl+C to quit and clean up.
+
+set -e
+
+GOOSE_APP="/Applications/Goose.app"
+
+if [[ ! -d "$GOOSE_APP" ]]; then
+    echo "Error: Goose.app not found at $GOOSE_APP" >&2
+    exit 1
+fi
+
+# Generate unique telepathy file for this session
+TELEPATHY_FILE="/tmp/goose-telepathy-$$.txt"
+touch "$TELEPATHY_FILE"
+
+# Export for tom extension
+export GOOSE_MOIM_MESSAGE_FILE="$TELEPATHY_FILE"
+
+# Cleanup on exit
+cleanup() {
+    rm -f "$TELEPATHY_FILE"
+    echo "Telepathy file cleaned up." >&2
+}
+trap cleanup EXIT
+
+echo "🦆 Goosetown GUI telepathy enabled: $TELEPATHY_FILE" >&2
+echo "Keep this terminal open. Press Ctrl+C when done to clean up." >&2
+
+# Launch GUI with -n to force new instance (ensures env var is picked up)
+# Note: If Goose is already running, this creates a second instance
+open -n -a "$GOOSE_APP" --args "$@"
+
+# Block until user presses Ctrl+C (open doesn't create a child process we can wait on)
+read -r -d '' _ 2>/dev/null

@@ -1,0 +1,59 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Pin to commit SHA for security (Semgrep requirement)
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y screen lsof
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f  # v4
+
+      - name: Install Python dependencies
+        run: uv sync
+
+      - name: Black format check
+        run: uv run black --check --line-length=120 scripts/ tests/
+
+      - name: Mypy type check
+        run: |
+          uv run mypy scripts/build-catalog
+          uv run mypy scripts/goosetown-ui
+          uv run mypy tests/
+
+      - name: Bandit security check
+        run: uv run bandit -c pyproject.toml scripts/build-catalog scripts/goosetown-ui
+
+      - name: Biome JS lint
+        run: |
+          curl -fsSL https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.0.0/biome-linux-x64 -o biome
+          echo "6c70d806418f976fd72d2c6d17f8b51c2aae5ea122f718c616abb1cebbb719dd  biome" | sha256sum -c
+          chmod +x biome
+          ./biome check ui/js/
+
+      - name: Semgrep security scan
+        run: |
+          pip install semgrep==1.112.0
+          semgrep --config p/security-audit --config p/python scripts/
+          semgrep --config p/security-audit --config p/javascript ui/js/
+
+      - name: gtwall tests
+        run: bash tests/test_gtwall.sh
+
+      - name: build-catalog tests
+        run: uv run pytest tests/test_catalog.py -v
+
+      - name: dashboard tests
+        run: bash tests/test_dashboard.sh

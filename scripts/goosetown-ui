@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+"""goosetown-ui — Real-time dashboard server for goosetown orchestrator sessions."""
+
+import argparse, asyncio, glob, json, os, re, sqlite3, sys, time
+from collections import deque
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+
+import uvicorn
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse, RedirectResponse, StreamingResponse
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
+
+# ── Constants ───────────────────────────────────────────────────────────────
+DB_PATH = os.path.expanduser("~/.local/share/goose/sessions/sessions.db")
+WALLS_DIR = os.path.expanduser("~/.goosetown/walls")
+CHILD_PATTERN = re.compile(r"Task (\d{8}_\d+) started in background")
+GTWALL_ID_PATTERN = re.compile(r"Your gtwall ID is (\S+)")
+DELEGATE_NAME_PATTERN = re.compile(r"You are (\S+)\.")
+ROLE_PATTERNS = {
+    "orchestrator": re.compile(r"orchestrat", re.I),
+    "researcher": re.compile(r"research", re.I),
+    "worker": re.compile(r"worker|build|implement", re.I),
+    "reviewer": re.compile(r"review|crossfire", re.I),
+    "writer": re.compile(r"writ|spec|document", re.I),
+}
+RING_BUFFER_SIZE = 10000
+WALL_LINE_MAX = 10000
+
+# ── State ───────────────────────────────────────────────────────────────────
+event_buffer: deque = deque(maxlen=RING_BUFFER_SIZE)
+event_counter: int = 0
+clients: list[asyncio.Queue] = []
+latest_wall_lines: deque[dict] = deque(maxlen=WALL_LINE_MAX)
+latest_sessions: list[dict] = []
+latest_tree: dict = {}
+latest_stats: dict = {}
+config: dict = {}
+
+
+# ── DB ──────────────────────────────────────────────────────────────────────
+@contextmanager
+def db():
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    try:
+        yield conn.cursor()
+    finally:
+        conn.close()
+
+
+def normalize_epoch(ts) -> float:
+    if ts is None:
+        return 0.0
+    ts = float(ts)
+    return ts / 1000.0 if ts > 1e12 else ts
+
+
+# ── Session Discovery ──────────────────────────────────────────────────────
+def find_parent_session(cur) -> str | None:
+    cur.execute("""
+        SELECT DISTINCT s.id FROM sessions s
+        JOIN messages m ON m.session_id = s.id
+        WHERE s.session_type = 'user'
+          AND m.role = 'user'
+          AND m.content_json LIKE '%started in background%'
+          AND s.updated_at > datetime('now', '-24 hours')
+        ORDER BY s.updated_at DESC LIMIT 1
+    """)
+    if row := cur.fetchone():
+        return row[0]
+    cur.execute("SELECT id FROM sessions WHERE session_type = 'user' ORDER BY updated_at DESC LIMIT 1")
+    return row[0] if (row := cur.fetchone()) else None
+
+
+def find_wall_file(session_key: str | None = None) -> str | None:
+    if session_key is None:
+        secret = os.environ.get("GOOSE_SERVER__SECRET_KEY", "")
+        session_key = secret[:8] if secret else None
+    if session_key:
+        path = os.path.join(WALLS_DIR, f"wall-{session_key}.log")
+        if os.path.isfile(path):
+            return path
+    wall_files = glob.glob(os.path.join(WALLS_DIR, "wall-*.log"))
+    return max(wall_files, key=os.path.getmtime) if wall_files else None
+
+
+# ── Wall Parsing ────────────────────────────────────────────────────────────
+def parse_wall_line(line: str) -> dict:
+    parts = line.split("|", 2)
+    if len(parts) < 3:
+        return {"time": "", "sender_id": "", "message": line, "raw": line, "parse_error": True}
+    return {
+        "time": parts[0].strip(),
+        "sender_id": parts[1].strip(),
+        "message": parts[2].strip().replace("\\|", "|"),
+        "raw": line,
+    }
+
+
+def wall_line_epoch(parsed: dict) -> float:
+    """Parse HH:MM:SS time string to today's epoch. Returns 0 on failure."""
+    t = parsed.get("time", "")
+    if not t:
+        return 0.0
+    try:
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        parts = t.split(":")
+        return (today.replace(
+            hour=int(parts[0]), minute=int(parts[1]),
+            second=int(parts[2]) if len(parts) > 2 else 0
+        )).timestamp()
+    except (ValueError, IndexError):
+        return 0.0
+
+
+# ── Tree Building ───────────────────────────────────────────────────────────
+def find_children(cur, parent_id: str) -> list[str]:
+    cur.execute(
+        "SELECT content_json FROM messages WHERE session_id = ? "
+        "AND role = 'user' AND content_json LIKE '%started in background%'",
+        (parent_id,),
+    )
+    seen, children = set(), []
+    for (content_json,) in cur:
+        for m in CHILD_PATTERN.finditer(content_json):
+            cid = m.group(1)
+            if cid not in seen:
+                seen.add(cid)
+                children.append(cid)
+    return children
+
+
+def extract_gtwall_id(content_json: str) -> str | None:
+    if m := GTWALL_ID_PATTERN.search(content_json):
+        return m.group(1).strip("`.")
+    if m := DELEGATE_NAME_PATTERN.search(content_json):
+        return m.group(1).strip("`.")
+    return None
+
+
+def build_sender_session_map(cur, parent_id: str) -> dict[str, str]:
+    cur.execute(
+        "SELECT role, content_json FROM messages WHERE session_id = ? "
+        "AND role IN ('assistant', 'user') ORDER BY created_timestamp ASC",
+        (parent_id,),
+    )
+    tool_id_to_gtwall, tool_id_to_session = {}, {}
+    for role, cj_str in cur:
+        try:
+            items = json.loads(cj_str)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for item in items:
+            if role == "assistant" and item.get("type") == "toolRequest":
+                tc = item.get("toolCall", {}).get("value", {})
+                if tc.get("name") == "delegate":
+                    gid = extract_gtwall_id(tc.get("arguments", {}).get("instructions", ""))
+                    if gid:
+                        tool_id_to_gtwall[item["id"]] = gid
+            elif role == "user" and item.get("type") == "toolResponse":
+                text = ""
+                try:
+                    text = item["toolResult"]["value"]["content"][0]["text"]
+                except (KeyError, IndexError, TypeError):
+                    pass
+                if child_match := CHILD_PATTERN.search(text):
+                    tool_id_to_session[item["id"]] = child_match.group(1)
+    return {gid: tool_id_to_session[tid] for tid, gid in tool_id_to_gtwall.items() if tid in tool_id_to_session}
+
+
+def infer_role(session_id: str, name: str, parent_id: str) -> str:
+    if session_id == parent_id:
+        return "orchestrator"
+    for role, pat in ROLE_PATTERNS.items():
+        if pat.search(name or ""):
+            return role
+    return "generic"
+
+
+def batch_check_errors(cur, session_ids: list[str]) -> set[str]:
+    if not session_ids:
+        return set()
+    placeholders = ",".join("?" * len(session_ids))
+    cur.execute(f"""
+        SELECT session_id FROM messages
+        WHERE session_id IN ({placeholders})
+          AND (content_json LIKE '%"isError":true%' OR content_json LIKE '%"isError": true%')
+          AND id IN (
+            SELECT id FROM messages m2
+            WHERE m2.session_id = messages.session_id
+            ORDER BY m2.created_timestamp DESC LIMIT 5
+          )
+    """, session_ids)
+    return {row[0] for row in cur.fetchall()}
+
+
+def infer_status(session: dict, has_error: bool, now: float) -> str:
+    if has_error:
+        return "error"
+    last = normalize_epoch(session.get("last_message_ts", 0))
+    if not last and session.get("updated_at"):
+        try:
+            last = datetime.fromisoformat(session["updated_at"].replace(" ", "T")).timestamp()
+        except (ValueError, AttributeError):
+            pass
+    elapsed = now - last if last else 999
+    if elapsed < 15:
+        return "active"
+    if elapsed < 30:
+        return "waiting"
+    if elapsed > 120:
+        return "complete"
+    return "idle"
+
+
+# ── Event Bus ───────────────────────────────────────────────────────────────
+def publish_event(name: str, data: dict):
+    global event_counter
+    event_counter += 1
+    entry = {"id": event_counter, "event": name, "data": data}
+    event_buffer.append(entry)
+    for q in clients:
+        try:
+            q.put_nowait(entry)
+        except asyncio.QueueFull:
+            pass
+
+
+def format_sse(eid: int, event: str, data) -> str:
+    return f"id: {eid}\nevent: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+# ── Background Tasks ───────────────────────────────────────────────────────
+async def wall_watcher():
+    wall_path = config.get("wall_file")
+    offset = 0
+    line_number = 0
+    partial = ""
+
+    while True:
+        await asyncio.sleep(0.5)
+        if not wall_path:
+            wall_path = find_wall_file()
+            config["wall_file"] = wall_path
+            if not wall_path:
+                continue
+
+        try:
+            st = os.stat(wall_path)
+        except OSError:
+            continue
+
+        # File truncated — reset
+        if st.st_size < offset:
+            offset = line_number = 0
+            partial = ""
+            latest_wall_lines.clear()
+
+        if st.st_size == offset:
+            continue
+
+        try:
+            with open(wall_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(offset)
+                chunk = f.read()
+                offset = f.tell()
+        except OSError:
+            continue
+
+        chunk = partial + chunk
+        lines = chunk.split("\n")
+        partial = lines.pop()
+
+        for raw in lines:
+            raw = raw.strip()
+            if not raw:
+                continue
+            line_number += 1
+            parsed = parse_wall_line(raw)
+            parsed["line"] = line_number
+            parsed["_epoch"] = wall_line_epoch(parsed)
+            latest_wall_lines.append(parsed)
+            publish_event("wall", parsed)
+
+
+async def sessions_tree_watcher():
+    global latest_sessions, latest_tree, latest_stats
+    parent_id = config.get("parent_session_id")
+    prev_sessions_hash = ""
+    prev_tree_hash = ""
+    prev_stats_hash = ""
+
+    while True:
+        await asyncio.sleep(1.0)
+        if not parent_id:
+            parent_id = config.get("parent_session_id")
+            if not parent_id:
+                continue
+        try:
+            with db() as cur:
+                # Sessions
+                cur.execute("""
+                    SELECT id, name, session_type AS type, created_at, updated_at,
+                        total_tokens, accumulated_total_tokens,
+                        accumulated_input_tokens, accumulated_output_tokens,
+                        provider_name,
+                        json_extract(model_config_json, '$.model_name') AS model
+                    FROM sessions
+                    WHERE updated_at > datetime('now', '-24 hours')
+                    ORDER BY updated_at DESC LIMIT 500
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+                h = json.dumps([(r["id"], r.get("accumulated_total_tokens"), r.get("updated_at")) for r in rows])
+                if h != prev_sessions_hash:
+                    prev_sessions_hash = h
+                    latest_sessions = rows
+                    publish_event("sessions", {"rows": rows})
+
+                # Tree
+                child_ids = find_children(cur, parent_id)
+                sender_map = build_sender_session_map(cur, parent_id)
+                session_to_gtwall = {sid: gid for gid, sid in sender_map.items()}
+                now = time.time()
+                children = []
+
+                if child_ids:
+                    ph = ",".join("?" * len(child_ids))
+                    cur.execute(f"""
+                        SELECT s.id, s.name, s.session_type, s.created_at, s.updated_at,
+                            s.accumulated_total_tokens,
+                            (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
+                            (SELECT MAX(m.created_timestamp) FROM messages m WHERE m.session_id = s.id) AS last_message_ts
+                        FROM sessions s WHERE s.id IN ({ph})
+                        ORDER BY s.created_at ASC
+                    """, child_ids)
+                    child_rows = [dict(r) for r in cur.fetchall()]
+
+                    error_ids = batch_check_errors(cur, child_ids)
+
+                    for d in child_rows:
+                        d["role"] = infer_role(d["id"], d.get("name", ""), parent_id)
+                        d["gtwall_id"] = session_to_gtwall.get(d["id"]) or extract_gtwall_id(d.get("name", "")) or ""
+                        d["status"] = infer_status(d, d["id"] in error_ids, now)
+                        d["tokens"] = d.get("accumulated_total_tokens", 0) or 0
+                        created = 0.0
+                        if d.get("created_at"):
+                            try:
+                                created = datetime.fromisoformat(d["created_at"].replace(" ", "T")).timestamp()
+                            except (ValueError, AttributeError):
+                                pass
+                        d["elapsed_seconds"] = round(now - created) if created else 0
+                        children.append(d)
+
+                tree = {"parent_session_id": parent_id, "children": children, "sender_map": sender_map}
+                th = json.dumps([(c["id"], c.get("status"), c.get("tokens"), c.get("message_count")) for c in children])
+                if th != prev_tree_hash:
+                    prev_tree_hash = th
+                    latest_tree = tree
+                    publish_event("tree", tree)
+
+                active = sum(1 for c in children if c.get("status") == "active")
+                complete = sum(1 for c in children if c.get("status") == "complete")
+                error = sum(1 for c in children if c.get("status") == "error")
+                total_tokens = sum(c.get("tokens", 0) for c in children)
+
+                cutoff_ts = now - 60
+                rate = sum(1 for ln in latest_wall_lines if ln.get("_epoch", 0) > cutoff_ts)
+
+                stats = {
+                    "wall": {"lines_total": len(latest_wall_lines), "rate_per_min": rate},
+                    "sessions": {"active": active, "complete": complete, "error": error},
+                    "tokens": {"accumulated_total": total_tokens},
+                }
+                sh = json.dumps(stats, sort_keys=True)
+                if sh != prev_stats_hash:
+                    prev_stats_hash = sh
+                    latest_stats = stats
+                    publish_event("stats", stats)
+
+        except Exception as e:
+            print(f"⚠️  sessions_tree_watcher error: {e}", file=sys.stderr)
+
+
+# ── SSE Endpoint ────────────────────────────────────────────────────────────
+async def sse_endpoint(request):
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    clients.append(queue)
+    last_event_id = request.headers.get("Last-Event-ID")
+
+    async def generate():
+        try:
+            bootstrap_data = json.dumps({
+                "wall": {"wall_id": config.get("wall_id", ""), "lines": list(latest_wall_lines)},
+                "sessions": {"rows": latest_sessions},
+                "tree": latest_tree,
+                "stats": latest_stats,
+            }, default=str)
+            yield f"event: bootstrap\ndata: {bootstrap_data}\n\n"
+
+            if last_event_id:
+                try:
+                    lid = int(last_event_id)
+                    for entry in event_buffer:
+                        if entry["id"] > lid:
+                            yield format_sse(entry["id"], entry["event"], entry["data"])
+                except (ValueError, TypeError):
+                    pass
+
+            while True:
+                try:
+                    entry = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield format_sse(entry["id"], entry["event"], entry["data"])
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        finally:
+            if queue in clients:
+                clients.remove(queue)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── REST ────────────────────────────────────────────────────────────────────
+async def messages_endpoint(request):
+    sid = request.path_params["session_id"]
+    before = request.query_params.get("before")
+
+    try:
+        limit = min(int(request.query_params.get("limit", "100")), 500)
+        with db() as cur:
+            if before:
+                cur.execute(
+                    "SELECT id, role, content_json, created_timestamp FROM messages "
+                    "WHERE session_id = ? AND created_timestamp < ? "
+                    "ORDER BY created_timestamp DESC LIMIT ?",
+                    (sid, before, limit),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, role, content_json, created_timestamp FROM messages "
+                    "WHERE session_id = ? ORDER BY created_timestamp DESC LIMIT ?",
+                    (sid, limit),
+                )
+            rows = [{"id": r[0], "role": r[1], "content_json": r[2], "created_timestamp": r[3]} for r in cur.fetchall()]
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    rows.reverse()
+    return JSONResponse({"session_id": sid, "messages": rows, "has_more": len(rows) == limit})
+
+
+async def config_endpoint(request):
+    return JSONResponse(config)
+
+
+async def root_redirect(request):
+    return RedirectResponse(url="/ui/index.html")
+
+
+# ── App ─────────────────────────────────────────────────────────────────────
+def create_app() -> Starlette:
+    ui_dir = os.path.join(PROJECT_DIR, "ui")
+    return Starlette(
+        routes=[
+            Route("/", root_redirect),
+            Route("/events", sse_endpoint),
+            Route("/api/messages/{session_id}", messages_endpoint),
+            Route("/api/config", config_endpoint),
+            Mount("/ui", StaticFiles(directory=ui_dir), name="ui"),
+        ],
+
+        on_startup=[start_background_tasks],
+    )
+
+
+async def start_background_tasks():
+    asyncio.create_task(wall_watcher())
+    asyncio.create_task(sessions_tree_watcher())
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description="goosetown-ui dashboard server")
+    parser.add_argument("--session", help="Parent session ID (auto-detect if omitted)")
+    parser.add_argument("--port", type=int, default=4242, help="Port (default: 4242)")
+    parser.add_argument("--wall", help="Wall file path (auto-detect if omitted)")
+    args = parser.parse_args()
+
+    parent_id = args.session
+    if not parent_id:
+        try:
+            with db() as cur:
+                parent_id = find_parent_session(cur)
+        except Exception as e:
+            print(f"⚠️  Could not auto-detect session: {e}", file=sys.stderr)
+
+    print(f"📋 Parent session: {parent_id}" if parent_id else "⚠️  No parent session found — will retry in background", file=sys.stderr)
+
+    wall_file = args.wall or find_wall_file()
+    wall_id = ""
+    if wall_file:
+        wall_id = Path(wall_file).stem.replace("wall-", "")
+        print(f"📜 Wall file: {wall_file}", file=sys.stderr)
+    else:
+        print("⚠️  No wall file found — will poll for it", file=sys.stderr)
+
+    config.update({
+        "parent_session_id": parent_id,
+        "wall_file": wall_file,
+        "wall_id": wall_id,
+        "db_path": DB_PATH,
+        "port": args.port,
+    })
+
+    print(f"\n🏭 gooseTown dashboard: http://localhost:{args.port}/\n", file=sys.stderr)
+    uvicorn.run(create_app(), host="127.0.0.1", port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

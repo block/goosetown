@@ -1,0 +1,46 @@
+[project]
+name = "goosetown"
+version = "0.1.0"
+description = "Multi-agent coordination for goose using skills and async delegates"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [{name = "Block, Inc."}]
+requires-python = ">=3.11"
+dependencies = [
+    "starlette>=0.40,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+    "pyyaml>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/block/goosetown"
+Repository = "https://github.com/block/goosetown"
+Issues = "https://github.com/block/goosetown/issues"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "black>=24.0",
+    "mypy>=1.14.0",
+    "bandit>=1.8.0",
+    "types-PyYAML>=6.0",
+]
+
+[tool.black]
+line-length = 120
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_ignores = true
+disallow_untyped_defs = false
+check_untyped_defs = false
+exclude = ["REPOS/", ".scratch/", ".venv/"]
+# Standalone scripts without type annotations - start very permissive
+ignore_missing_imports = true
+
+[tool.bandit]
+exclude_dirs = ["tests", "REPOS", ".scratch", ".venv"]
+# B101: assert_used - fine in non-production code
+# B608: hardcoded_sql_expressions - false positives on parameterized queries with dynamic placeholders
+skips = ["B101", "B608"]

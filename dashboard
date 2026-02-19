@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# dashboard — Launch goosetown dashboard. Idempotent. Port on stdout, noise on stderr.
+#
+# Multi-instance safe: each goose instance (identified by GOOSE_SERVER__SECRET_KEY)
+# gets its own dashboard. Instances never interfere with each other — no shared screen
+# names, no global pkill, no "stale session" replacement.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DB_PATH="$HOME/.local/share/goose/sessions/sessions.db"
+WALLS_DIR="$HOME/.goosetown/walls"
+PORT_MIN=4242
+PORT_MAX=4300
+
+die()  { echo "ERROR: $*" >&2; exit 1; }
+die2() { echo "ERROR: $*" >&2; exit 2; }
+info() { echo "$*" >&2; }
+
+command -v uv &>/dev/null || die "uv not found. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
+
+# ── Instance identity ───────────────────────────────────────────────────────
+# GOOSE_SERVER__SECRET_KEY is a UUID unique per goose instance. The first 8 chars
+# (WALL_ID) already scope wall files and position dirs — we reuse it to scope
+# screen sessions and portfiles so multiple dashboards can coexist.
+[[ -n "${GOOSE_SERVER__SECRET_KEY:-}" ]] || die2 "GOOSE_SERVER__SECRET_KEY not set"
+WALL_ID="${GOOSE_SERVER__SECRET_KEY:0:8}"
+SCREEN_NAME="goosetown-ui-${WALL_ID}"
+PORTFILE="${WALLS_DIR}/dashboard-${WALL_ID}.port"
+
+# ── Session resolution ──────────────────────────────────────────────────────
+resolve_session() {
+  local sid="${AGENT_SESSION_ID:-}"
+
+  if [[ -z "$sid" ]] && command -v sqlite3 &>/dev/null && [[ -f "$DB_PATH" ]]; then
+    # Prefer orchestrator session (has delegates)
+    sid=$(sqlite3 "$DB_PATH" "
+      SELECT DISTINCT s.id FROM sessions s
+      JOIN messages m ON m.session_id = s.id
+      WHERE s.session_type = 'user'
+        AND m.role = 'user'
+        AND m.content_json LIKE '%started in background%'
+        AND s.updated_at > datetime('now', '-24 hours')
+      ORDER BY s.updated_at DESC LIMIT 1;
+    " 2>/dev/null || true)
+
+    # Fallback: any recent user session
+    if [[ -z "$sid" ]]; then
+      sid=$(sqlite3 "$DB_PATH" "
+        SELECT id FROM sessions WHERE session_type = 'user'
+        ORDER BY updated_at DESC LIMIT 1;
+      " 2>/dev/null || true)
+    fi
+  fi
+
+  [[ -n "$sid" ]] || die "No session found. Set AGENT_SESSION_ID or ensure sessions.db exists."
+  echo "$sid"
+}
+
+# ── Wall resolution ─────────────────────────────────────────────────────────
+resolve_wall() {
+  local wall_file="${WALLS_DIR}/wall-${WALL_ID}.log"
+  mkdir -p "$WALLS_DIR"
+  touch "$wall_file"
+  echo "$wall_file"
+}
+
+# ── Port helpers ────────────────────────────────────────────────────────────
+port_free() { ! (echo >/dev/tcp/127.0.0.1/"$1") 2>/dev/null; }
+
+find_free_port() {
+  for p in $(seq $PORT_MIN $PORT_MAX); do
+    if port_free "$p"; then
+      echo "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Check if THIS instance's dashboard is running. Uses the portfile, then
+# verifies the process is actually alive. Returns the port on stdout.
+find_mine() {
+  [[ -f "$PORTFILE" ]] || return 1
+  local port
+  port=$(<"$PORTFILE")
+  [[ -n "$port" ]] || return 1
+  # Verify it's actually responding
+  if curl -sf "http://localhost:$port/api/config" >/dev/null 2>&1; then
+    echo "$port"
+    return 0
+  fi
+  # Portfile exists but process is dead — clean up
+  rm -f "$PORTFILE"
+  return 1
+}
+
+# Kill only THIS instance's processes. Never touches other instances.
+# Uses -sTCP:LISTEN to avoid killing clients (browsers) with connections to the port.
+kill_mine() {
+  local port="${1:-}"
+  screen -S "$SCREEN_NAME" -X quit 2>/dev/null || true
+  if [[ -n "$port" ]]; then
+    lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
+  fi
+  rm -f "$PORTFILE"
+}
+
+# ── Commands ────────────────────────────────────────────────────────────────
+cmd_status() {
+  local port
+  if port=$(find_mine); then
+    info "Dashboard running on port $port (instance $WALL_ID)"
+    echo "$port"
+    exit 0
+  else
+    info "Dashboard not running (instance $WALL_ID)"
+    exit 1
+  fi
+}
+
+cmd_stop() {
+  local port
+  if port=$(find_mine); then
+    info "Stopping dashboard on port $port (instance $WALL_ID)..."
+    kill_mine "$port"
+    info "Stopped."
+  else
+    # No live dashboard, but clean up any orphaned screen session
+    screen -S "$SCREEN_NAME" -X quit 2>/dev/null || true
+    rm -f "$PORTFILE"
+    info "No running dashboard found (instance $WALL_ID)."
+  fi
+  exit 0
+}
+
+cmd_launch() {
+  local session_id wall_file port
+
+  session_id=$(resolve_session)
+  wall_file=$(resolve_wall)
+
+  # Idempotent: if this instance already has a dashboard, return it
+  if port=$(find_mine); then
+    info "Dashboard already running (port $port, instance $WALL_ID)"
+    echo "$port"
+    return 0
+  fi
+
+  # Clean up any orphaned screen session for this instance (no global pkill)
+  screen -S "$SCREEN_NAME" -X quit 2>/dev/null || true
+  sleep 0.3
+
+  # Find open port
+  port=$(find_free_port) || { echo "ERROR: All ports $PORT_MIN-$PORT_MAX busy" >&2; exit 3; }
+
+  info "Launching dashboard on port $port (instance $WALL_ID, session ${session_id:0:12}...)"
+  screen -dmS "$SCREEN_NAME" bash -c "cd '$SCRIPT_DIR' && uv run scripts/goosetown-ui --session '$session_id' --wall '$wall_file' --port '$port'"
+
+  # Wait for server readiness, then write portfile. Writing after readiness avoids a
+  # race where a concurrent call sees the portfile, fails the curl check, and deletes
+  # it — orphaning the server that's still starting up.
+  for _ in 1 2 3 4 5; do
+    sleep 1
+    if curl -sf "http://localhost:$port/api/config" >/dev/null 2>&1; then
+      echo "$port" > "$PORTFILE"
+      info "✅ Dashboard ready at http://localhost:$port"
+      echo "$port"
+      return 0
+    fi
+  done
+
+  # Failed — kill the orphaned screen session so it doesn't leak
+  screen -S "$SCREEN_NAME" -X quit 2>/dev/null || true
+  echo "ERROR: Dashboard failed to start within 5s. Check logs." >&2
+  exit 4
+}
+
+cmd_open() {
+  cmd_launch
+  local port
+  port=$(find_mine) || return 0
+  if command -v open &>/dev/null; then
+    open "http://localhost:$port"
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "http://localhost:$port"
+  fi
+}
+
+cmd_help() {
+  cat >&2 <<'EOF'
+Usage: ./dashboard [--stop|--status|--open|--help]
+
+  (no args)   Launch dashboard (idempotent). Port on stdout.
+  --stop      Stop this instance's dashboard
+  --status    Check if this instance is running. Port on stdout if yes, exit 1 if no.
+  --open      Launch + open in browser
+  --help      This message
+
+Multiple goose instances get separate dashboards (ports 4242-4300).
+Each instance is scoped by GOOSE_SERVER__SECRET_KEY.
+
+Exit codes: 0=ok, 1=error/not-running, 2=config-error, 3=port-exhaustion, 4=startup-timeout
+EOF
+  exit 0
+}
+
+# ── Main ────────────────────────────────────────────────────────────────────
+case "${1:-}" in
+  --stop)   cmd_stop ;;
+  --status) cmd_status ;;
+  --open)   cmd_open ;;
+  --help|-h) cmd_help ;;
+  "")       cmd_launch ;;
+  *)        die "Unknown option: $1. Try --help" ;;
+esac

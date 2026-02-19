@@ -1,0 +1,1081 @@
+/* ==========================================================================
+   Goosetown — Steampunk Design System
+   Warm coppers & ambers on dark walnut. Joyful, not gritty. Golden hour.
+   ========================================================================== */
+
+/* --- 1. CSS Custom Properties ------------------------------------------- */
+
+:root {
+  /* Base Palette (warm darks) */
+  --bg-deepest: #0F0C09;
+  --bg-primary: #1A1210;
+  --bg-secondary: #2D2118;
+  --bg-card: #3D2B1F;
+  --bg-input: #241A13;
+
+  /* Accent: Copper & Bronze */
+  --copper: #B87333;
+  --copper-light: #CD7F32;
+  --copper-dim: rgba(184, 115, 51, 0.3);
+  --brass: #DAA520;
+
+  /* Accent: Teal (Block brand bridge) */
+  --teal: #13bbaf;
+  --teal-dim: rgba(19, 187, 175, 0.15);
+  --teal-hover: #17d4c6;
+
+  /* Text */
+  --text-primary: #FFFDD0;
+  --text-secondary: #C4956A;
+  --text-dim: #8B7355;
+
+  /* Status Lanterns */
+  --status-active: #FFBF00;
+  --status-waiting: #DAA520;
+  --status-complete: #7DB46C;
+  --status-error: #CC4444;
+  --status-idle: #8B7355;
+
+  /* Semantic */
+  --border-default: rgba(184, 115, 51, 0.2);
+  --border-active: rgba(184, 115, 51, 0.6);
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --radius-sm: 4px;
+  --radius-md: 6px;
+
+  /* Spacing (4px base) */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+
+  /* Typography */
+  --font-display: 'Cinzel', 'Playfair Display', Georgia, serif;
+  --font-body: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+  --fs-xs: 10px;
+  --fs-sm: 11px;
+  --fs-base: 12px;
+  --fs-md: 13px;
+  --fs-lg: 14px;
+  --fs-xl: 16px;
+  --fs-2xl: 18px;
+  --fs-3xl: 24px;
+}
+
+/* --- 2. Reset + Base ---------------------------------------------------- */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scrollbar-width: thin;
+  scrollbar-color: var(--copper-dim) var(--bg-primary);
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg-deepest);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: var(--fs-lg);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a { color: var(--teal); text-decoration: none; }
+a:hover { color: var(--teal-hover); }
+
+button {
+  border: none;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* --- 3. Typography ------------------------------------------------------ */
+
+code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+}
+
+/* --- 4. Layout (Grid + Panels) ----------------------------------------- */
+
+.layout {
+  display: grid;
+  grid-template-columns: 240px 1fr 1fr;
+  grid-template-rows: 1fr auto;
+  grid-template-areas:
+    "registry bulletin workshop"
+    "clockworks clockworks clockworks";
+  height: 100vh;
+  background: var(--bg-primary);
+  transition: grid-template-columns 0.3s ease;
+}
+
+.layout.workshop-collapsed {
+  grid-template-columns: 240px 1fr 0px;
+}
+
+.layout.workshop-collapsed .workshop {
+  overflow: hidden;
+  padding: 0;
+  border-left: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, padding 0.3s ease;
+}
+
+.registry {
+  grid-area: registry;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  overflow-y: auto;
+  padding: var(--space-md);
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-default);
+}
+
+.registry-divider {
+  height: 1px;
+  margin: var(--space-sm) 0;
+  background: var(--border-default);
+}
+
+.bulletin {
+  grid-area: bulletin;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+.bulletin-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+}
+
+.bulletin-feed {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: var(--space-xs);
+  overflow-y: auto;
+  padding: var(--space-md);
+}
+
+.workshop {
+  grid-area: workshop;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  overflow-y: auto;
+  padding: var(--space-md);
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-default);
+  /* Keep above backdrop on desktop if it fires accidentally */
+  position: relative;
+  z-index: 100;
+  opacity: 1;
+  transition: opacity 0.2s ease 0.1s, padding 0.3s ease;
+}
+
+.workshop-close {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  display: block;
+  font-size: var(--fs-2xl);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.workshop-close:hover {
+  color: var(--text-primary);
+}
+
+.workshop-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding-bottom: var(--space-sm);
+  border-bottom: 1px solid var(--border-default);
+  position: relative;
+}
+
+.workshop-name {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.04em;
+}
+
+.workshop-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.workshop-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: var(--space-sm);
+  overflow-y: auto;
+}
+
+.workshop-elapsed,
+.workshop-tokens {
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  color: var(--text-secondary);
+}
+
+.workshop-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: var(--space-xl) var(--space-md);
+  font-size: var(--fs-md);
+  font-style: italic;
+  line-height: 1.6;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.clockworks {
+  grid-area: clockworks;
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  min-height: 40px;
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--fs-base);
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--copper-dim);
+}
+
+.hamburger {
+  display: none;
+  position: fixed;
+  top: var(--space-sm);
+  left: var(--space-sm);
+  z-index: 101;
+  padding: 2px 6px;
+  font-size: var(--fs-3xl);
+  line-height: 1;
+  color: var(--copper);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+/* --- 5. Cards ----------------------------------------------------------- */
+
+.card {
+  padding: var(--space-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.card:hover {
+  border-color: var(--border-active);
+}
+
+.card.selected {
+  border-color: var(--teal);
+  box-shadow: var(--shadow-card), 0 0 8px var(--teal-dim);
+}
+
+/* --- 6. Chat Bubbles ---------------------------------------------------- */
+
+.bubble {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-card);
+  border-left: 3px solid var(--role-color, var(--copper-dim));
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  margin-bottom: var(--space-xs);
+  word-break: break-word;
+}
+
+.bubble-start {
+  border-left-color: var(--text-dim);
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.bubble-discovery {
+  border-left-color: var(--copper-light);
+  box-shadow: inset 0 0 12px rgba(218, 165, 32, 0.06);
+}
+
+.bubble-done {
+  border-left-color: var(--status-complete);
+  opacity: 0.9;
+}
+
+.bubble-warning {
+  border-left-color: var(--brass);
+}
+
+/* Full border override — shorthand resets border-left from .bubble */
+.bubble-signal {
+  padding: var(--space-md);
+  background: rgba(218, 165, 32, 0.05);
+  border: 1px solid var(--brass);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+}
+
+/* --- 7. Badges & Lanterns ----------------------------------------------- */
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+}
+
+.lantern {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.lantern-active {
+  background: var(--status-active);
+  animation: lantern-glow 2s ease-in-out infinite;
+}
+
+.lantern-waiting {
+  background: var(--status-waiting);
+  animation: lantern-glow 3s ease-in-out infinite;
+}
+
+.lantern-complete {
+  background: var(--status-complete);
+  box-shadow: 0 0 6px rgba(125, 180, 108, 0.25);
+}
+
+.lantern-error {
+  background: var(--status-error);
+  box-shadow: 0 0 6px rgba(204, 68, 68, 0.3);
+}
+
+.lantern-idle {
+  background: var(--status-idle);
+}
+
+/* --- 8. Tabs ------------------------------------------------------------ */
+
+.tab-bar {
+  display: flex;
+  gap: var(--space-xs);
+  border-bottom: 1px solid var(--border-default);
+  margin-bottom: var(--space-md);
+}
+
+.tab {
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--text-dim);
+  background: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.tab:hover {
+  color: var(--text-secondary);
+}
+
+.tab.active {
+  color: var(--copper-light);
+  border-bottom-color: var(--copper);
+}
+
+.tool-chatter-toggle {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.tool-chatter-toggle:hover {
+  color: var(--text-secondary);
+  border-color: var(--border-active);
+}
+
+/* --- 9. Filter Bar ------------------------------------------------------ */
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.filter-btn {
+  padding: 3px 10px;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+}
+
+.filter-btn:hover {
+  color: var(--text-secondary);
+  border-color: var(--border-active);
+}
+
+.filter-btn.active {
+  color: var(--teal);
+  background: var(--teal-dim);
+  border-color: var(--teal);
+}
+
+/* --- 10. Pills & Banners ------------------------------------------------ */
+
+.new-messages-pill {
+  position: absolute;
+  bottom: var(--space-md);
+  left: 50%;
+  z-index: 10;
+  transform: translateX(-50%);
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--bg-deepest);
+  background: var(--teal);
+  border-radius: 20px;
+  box-shadow: 0 2px 8px rgba(19, 187, 175, 0.3);
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.new-messages-pill:hover {
+  background: var(--teal-hover);
+}
+
+.quiet-moment {
+  padding: var(--space-lg) 0;
+  font-size: var(--fs-base);
+  font-style: italic;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.load-older-btn {
+  display: block;
+  margin: var(--space-sm) auto;
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.load-older-btn:hover {
+  color: var(--text-secondary);
+  border-color: var(--border-active);
+}
+
+/* --- 11. Character Avatars (Role Colors) -------------------------------- */
+
+.role-orchestrator { --role-color: var(--brass); }
+.role-researcher   { --role-color: var(--teal); }
+.role-worker       { --role-color: var(--copper); }
+.role-reviewer     { --role-color: #9B59B6; }
+.role-writer       { --role-color: #5DADE2; }
+.role-generic      { --role-color: var(--text-secondary); }
+
+/* --- 12. Animations ----------------------------------------------------- */
+
+@keyframes lantern-glow {
+  0%, 100% { box-shadow: 0 0 6px rgba(255, 191, 0, 0.4); }
+  50%      { box-shadow: 0 0 12px rgba(255, 191, 0, 0.7); }
+}
+
+@keyframes gear-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes message-enter {
+  from { opacity: 0; transform: translateX(-12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.message-new    { animation: message-enter 0.3s ease-out; }
+.gear-spinner   { animation: gear-spin 3s linear infinite; }
+
+/* --- 13. Clockworks ----------------------------------------------------- */
+
+.clockworks-inner {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.clockworks-stat {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  white-space: nowrap;
+}
+
+.clockworks-divider {
+  flex-shrink: 0;
+  width: 1px;
+  height: 16px;
+  background: var(--copper-dim);
+}
+
+.connection-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-left: auto;
+}
+
+.connected .connection-indicator .lantern {
+  background: var(--status-complete);
+  box-shadow: 0 0 4px rgba(125, 180, 108, 0.3);
+}
+
+.disconnected .connection-indicator .lantern {
+  background: var(--status-error);
+  animation: lantern-glow 1s ease-in-out infinite;
+}
+
+/* --- 14. Backdrop ------------------------------------------------------- */
+
+.backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.backdrop.active {
+  display: block;
+}
+
+/* --- 15. Workshop Content (Conversation + Artifacts) -------------------- */
+
+.conversation-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: var(--space-xs) 0;
+  margin-bottom: var(--space-xs);
+}
+
+.conversation-feed {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: var(--space-sm);
+  overflow-y: auto;
+  padding: var(--space-xs) 0;
+}
+
+.conversation-empty {
+  padding: var(--space-xl) var(--space-md);
+  font-size: var(--fs-md);
+  font-style: italic;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.msg-bubble {
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  color: var(--text-primary);
+  word-break: break-word;
+  background: var(--bg-card);
+  border-left: 4px solid var(--copper-dim);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  animation: message-enter 0.25s ease-out;
+}
+
+.msg-user {
+  background: rgba(19, 187, 175, 0.06);
+  border-left-color: var(--teal);
+}
+
+.msg-assistant {
+  background: rgba(184, 115, 51, 0.06);
+  border-left-color: var(--copper);
+}
+
+.msg-system {
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--fs-base);
+  font-style: italic;
+  color: var(--text-dim);
+  text-align: center;
+  border-left: none;
+}
+
+.tool-request {
+  margin: var(--space-xs) 0;
+  font-size: var(--fs-base);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.tool-request summary {
+  padding: var(--space-xs) var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.2s, background 0.2s;
+}
+
+.tool-request summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-request summary::before {
+  content: '▸ ';
+  color: var(--copper-dim);
+}
+
+.tool-request[open] summary::before {
+  content: '▾ ';
+  color: var(--copper);
+}
+
+.tool-request summary:hover {
+  color: var(--text-secondary);
+  background: rgba(184, 115, 51, 0.05);
+}
+
+.tool-args {
+  max-height: 200px;
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text-secondary);
+  background: var(--bg-deepest);
+  border-top: 1px solid var(--border-default);
+}
+
+.tool-response {
+  margin: var(--space-xs) 0;
+  background: var(--bg-deepest);
+  border-left: 3px solid var(--copper-dim);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  overflow: hidden;
+}
+
+.tool-response pre {
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+}
+
+.tool-error {
+  border-left-color: var(--status-error);
+  background: rgba(204, 68, 68, 0.06);
+}
+
+.tool-error pre {
+  color: #e88;
+}
+
+.artifacts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+}
+
+.artifacts-empty {
+  padding: var(--space-xl) var(--space-md);
+  font-size: var(--fs-md);
+  font-style: italic;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.artifact-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-default);
+  transition: background 0.15s;
+}
+
+.artifact-item:first-child {
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+.artifact-item:last-child {
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  border-bottom: none;
+}
+
+.artifact-item:only-child {
+  border-radius: var(--radius-md);
+}
+
+.artifact-item:hover {
+  background: rgba(184, 115, 51, 0.08);
+}
+
+.artifact-file {
+  border-left: 3px solid var(--copper);
+}
+
+.artifact-shell {
+  border-left: 3px solid var(--teal);
+}
+
+.artifact-icon {
+  flex-shrink: 0;
+  font-size: var(--fs-lg);
+  line-height: 1.4;
+}
+
+.artifact-path {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  line-height: 1.4;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.artifact-action {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--copper-light);
+  background: var(--copper-dim);
+  border-radius: 8px;
+}
+
+.artifact-cmd {
+  flex: 1;
+  max-height: 60px;
+  overflow-y: auto;
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-secondary);
+  background: var(--bg-deepest);
+  border-radius: var(--radius-sm);
+}
+
+/* --- 16. Responsive Breakpoints ----------------------------------------- */
+
+/* Tablet: 2-panel (workshop collapses to overlay) */
+@media (max-width: 1200px) {
+  .layout {
+    grid-template-columns: 200px 1fr;
+    grid-template-areas:
+      "registry bulletin"
+      "clockworks clockworks";
+  }
+
+  .workshop {
+    position: fixed;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 100;
+    width: 320px;
+    border-left: 1px solid var(--border-default);
+    transform: translateX(100%);
+    transition: transform 0.3s;
+  }
+
+  .workshop.open {
+    transform: translateX(0);
+  }
+}
+
+/* Mobile: 1-panel (registry collapses to hamburger) */
+@media (max-width: 800px) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "bulletin"
+      "clockworks";
+  }
+
+  .registry {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 100;
+    width: 280px;
+    border-right: 1px solid var(--border-default);
+    transform: translateX(-100%);
+    transition: transform 0.3s;
+  }
+
+  .registry.open {
+    transform: translateX(0);
+  }
+
+  .hamburger {
+    display: block;
+  }
+
+  .clockworks {
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    min-height: auto;
+    padding: var(--space-sm) var(--space-md);
+  }
+}
+
+/* --- 17. Scrollbar Theming ---------------------------------------------- */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--copper-dim);
+  border-radius: var(--radius-sm);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--copper);
+}
+
+/* --- 18. Accessibility -------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* --- 19. Markdown Body (rendered markdown in conversation) --------------- */
+
+.markdown-body {
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.markdown-body > *:first-child { margin-top: 0; }
+.markdown-body > *:last-child { margin-bottom: 0; }
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  font-family: var(--font-display);
+  line-height: 1.3;
+  color: var(--copper-light);
+  letter-spacing: 0.02em;
+  margin: var(--space-md) 0 var(--space-sm) 0;
+}
+
+.markdown-body h1 { font-size: var(--fs-2xl); border-bottom: 1px solid var(--border-default); padding-bottom: var(--space-xs); }
+.markdown-body h2 { font-size: var(--fs-xl); border-bottom: 1px solid var(--border-default); padding-bottom: var(--space-xs); }
+.markdown-body h3 { font-size: var(--fs-lg); }
+.markdown-body h4 { font-size: var(--fs-md); }
+
+.markdown-body p {
+  margin: var(--space-sm) 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: var(--space-sm) 0;
+  padding-left: var(--space-lg);
+}
+
+.markdown-body li {
+  margin: var(--space-xs) 0;
+}
+
+.markdown-body li > ul,
+.markdown-body li > ol {
+  margin: 2px 0;
+}
+
+.markdown-body code {
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  color: var(--copper-light);
+  background: var(--bg-deepest);
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+}
+
+.markdown-body pre {
+  max-height: 400px;
+  overflow: auto;
+  margin: var(--space-sm) 0;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-deepest);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+}
+
+.markdown-body pre code {
+  padding: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+}
+
+.markdown-body blockquote {
+  margin: var(--space-sm) 0;
+  padding: var(--space-xs) var(--space-md);
+  color: var(--text-secondary);
+  background: rgba(218, 165, 32, 0.04);
+  border-left: 3px solid var(--brass);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.markdown-body blockquote p {
+  margin: var(--space-xs) 0;
+}
+
+.markdown-body table {
+  width: 100%;
+  margin: var(--space-sm) 0;
+  font-size: var(--fs-base);
+  border-collapse: collapse;
+}
+
+.markdown-body th,
+.markdown-body td {
+  padding: var(--space-xs) var(--space-sm);
+  text-align: left;
+  border: 1px solid var(--border-default);
+}
+
+.markdown-body th {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--copper-light);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--bg-deepest);
+}
+
+.markdown-body tr:nth-child(even) {
+  background: rgba(184, 115, 51, 0.03);
+}
+
+.markdown-body hr {
+  margin: var(--space-md) 0;
+  border: none;
+  border-top: 1px solid var(--border-default);
+}
+
+.markdown-body a {
+  color: var(--teal);
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  color: var(--teal-hover);
+  text-decoration: underline;
+}
+
+.markdown-body strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.markdown-body em {
+  color: var(--text-secondary);
+}
+
+.markdown-body img {
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+}

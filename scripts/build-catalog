@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+"""
+build-catalog — Generate CATALOG.md from YAML frontmatter in knowledge files.
+
+Scans GUIDES/, PLANS/, RESEARCH/, and WORK_LOGS/ for .md files, parses YAML frontmatter,
+validates fields, and produces a structured catalog.
+
+Modes:
+  (default)   Warn mode — generate catalog, report issues to stderr, exit 0.
+  --strict    Exit non-zero if ANY file is missing frontmatter or has errors.
+
+This script never modifies knowledge source files. It only writes CATALOG.md.
+"""
+
+import argparse
+import os
+import re
+import sys
+import yaml
+from datetime import datetime, date, timedelta
+from pathlib import Path, PurePosixPath
+from collections import defaultdict
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ── Constants ───────────────────────────────────────────────────────────────
+REPO_ROOT = Path(SCRIPT_DIR).parent
+SCAN_DIRS = ["GUIDES", "PLANS", "RESEARCH", "WORK_LOGS"]
+GUIDE_VERIFIED_STALE_DAYS = 90
+VALID_STATUSES = {"active", "superseded", "stale", "draft"}
+TAG_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+TAGS_MD = REPO_ROOT / "TAGS.md"
+CATALOG_MD = REPO_ROOT / "CATALOG.md"
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def warn(msg: str):
+    """Print a warning to stderr."""
+    print(f"⚠️  {msg}", file=sys.stderr)
+
+
+def escape_md_cell(s: str) -> str:
+    """Escape characters that break markdown table cells."""
+    if not isinstance(s, str):
+        s = str(s)
+    return s.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+
+def parse_canonical_tags() -> set[str]:
+    """Read TAGS.md and extract canonical tag names from the table."""
+    tags: set[str] = set()
+    if not TAGS_MD.exists():
+        warn("TAGS.md not found — skipping canonical tag validation")
+        return tags
+    try:
+        text = TAGS_MD.read_text(encoding="utf-8")
+    except Exception as e:
+        warn(f"Cannot read TAGS.md: {e} — skipping canonical tag validation")
+        return tags
+    for line in text.splitlines():
+        m = re.match(r"^\|\s*`([^`]+)`\s*\|", line)
+        if m:
+            tags.add(m.group(1))
+    return tags
+
+
+def parse_frontmatter(filepath: Path) -> tuple[dict | None, str | None]:
+    """
+    Extract and parse YAML frontmatter from a markdown file.
+    Returns (parsed_dict, error_string). One of them is always None.
+    """
+    try:
+        text = filepath.read_text(encoding="utf-8")
+    except Exception as e:
+        return None, f"Cannot read file: {e}"
+
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None, "No frontmatter (missing opening ---)"
+
+    end_idx = None
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            end_idx = i
+            break
+
+    if end_idx is None:
+        return None, "No frontmatter (missing closing ---)"
+
+    yaml_text = "\n".join(lines[1:end_idx])
+    try:
+        data = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as e:
+        return None, f"YAML parse error: {e}"
+
+    if not isinstance(data, dict):
+        return None, "Frontmatter is not a YAML mapping"
+
+    return data, None
+
+
+def validate_frontmatter(data: dict) -> list[str]:
+    """Validate parsed frontmatter. Returns list of error strings."""
+    errors = []
+    required = ["title", "tags", "status", "created"]
+
+    for field in required:
+        if field not in data:
+            errors.append(f"Missing required field: {field}")
+
+    # title
+    if "title" in data and not isinstance(data["title"], str):
+        errors.append(f"'title' must be a string, got {type(data['title']).__name__}")
+
+    # tags
+    if "tags" in data:
+        tags = data["tags"]
+        if not isinstance(tags, list):
+            errors.append(f"'tags' must be a list, got {type(tags).__name__}")
+        else:
+            for t in tags:
+                if not isinstance(t, str):
+                    errors.append(f"Tag {t!r} is not a string")
+                elif not TAG_RE.match(t):
+                    errors.append(f"Tag '{t}' doesn't match pattern ^[a-z][a-z0-9-]*$")
+
+    # status
+    if "status" in data:
+        if not isinstance(data["status"], str):
+            errors.append(f"'status' must be a string, got {type(data['status']).__name__}")
+        elif data["status"] not in VALID_STATUSES:
+            errors.append(f"Invalid status '{data['status']}' — must be one of {VALID_STATUSES}")
+
+    # created
+    if "created" in data:
+        c = data["created"]
+        if isinstance(c, date):
+            pass  # yaml.safe_load auto-parses YYYY-MM-DD to date (and datetime)
+        elif isinstance(c, str):
+            try:
+                datetime.strptime(c, "%Y-%m-%d")
+            except ValueError:
+                errors.append(f"'created' must be YYYY-MM-DD, got '{c}'")
+        else:
+            errors.append(f"'created' must be a date (YYYY-MM-DD), got {type(c).__name__}")
+
+    # verified (optional — format check only)
+    if "verified" in data:
+        v = data["verified"]
+        if isinstance(v, date):
+            pass  # yaml.safe_load auto-parses YYYY-MM-DD
+        elif isinstance(v, str):
+            try:
+                datetime.strptime(v, "%Y-%m-%d")
+            except ValueError:
+                errors.append(f"'verified' must be YYYY-MM-DD, got '{v}'")
+        else:
+            errors.append(f"'verified' must be a date (YYYY-MM-DD), got {type(v).__name__}")
+
+    # sources (optional — format and safety check only)
+    if "sources" in data:
+        srcs = data["sources"]
+        if not isinstance(srcs, list):
+            errors.append(f"'sources' must be a list, got {type(srcs).__name__}")
+        else:
+            for src in srcs:
+                if not isinstance(src, str):
+                    errors.append(f"Source {src!r} is not a string")
+                else:
+                    pp = PurePosixPath(src)
+                    if pp.is_absolute() or ".." in pp.parts or "." in pp.parts or "\\" in src:
+                        errors.append(f"Source must be a safe relative repo path, got '{src}'")
+
+    return errors
+
+
+def detect_supersession_cycles(file_records: dict[str, dict]) -> list[str]:
+    """Detect cycles in supersession chains. Returns list of warnings."""
+    warnings = []
+    supersedes_map = {}
+    for relpath, rec in file_records.items():
+        fm = rec.get("frontmatter")
+        if fm and "supersedes" in fm and isinstance(fm["supersedes"], str):
+            supersedes_map[relpath] = fm["supersedes"]
+
+    reported = set()
+    for start in supersedes_map:
+        if start in reported:
+            continue
+        visited = set()
+        current = start
+        while current in supersedes_map:
+            if current in visited:
+                cycle_members = set()
+                c = current
+                while True:
+                    cycle_members.add(c)
+                    c = supersedes_map[c]
+                    if c == current:
+                        break
+                reported.update(cycle_members)
+                warnings.append(f"Supersession cycle: {' → '.join(sorted(cycle_members))}")
+                break
+            visited.add(current)
+            current = supersedes_map[current]
+
+    return warnings
+
+
+def format_tags(tags: list) -> str:
+    """Format tags as backtick-wrapped, comma-separated."""
+    if not tags or not isinstance(tags, list):
+        return ""
+    return ", ".join(f"`{t}`" for t in tags)
+
+
+def mtime_date(filepath: Path) -> str:
+    """Get file modification time as YYYY-MM-DD."""
+    try:
+        ts = os.path.getmtime(filepath)
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+    except OSError:
+        return "unknown"
+
+
+def mtime_datetime(filepath: Path) -> datetime:
+    """Get file modification time as datetime."""
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(filepath))
+    except OSError:
+        return datetime.min
+
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate CATALOG.md from YAML frontmatter")
+    parser.add_argument("--strict", action="store_true",
+                        help="Exit non-zero if any file has errors (missing/invalid frontmatter, bad fields). Warnings are not errors.")
+    args = parser.parse_args()
+
+    canonical_tags = parse_canonical_tags()
+
+    # ── Scan files (symlink-safe: no symlink dirs or files) ──────────
+    repo_real = REPO_ROOT.resolve()
+    all_files: list[tuple[str, Path]] = []  # (relpath, full_path)
+    for dirname in SCAN_DIRS:
+        dirpath = REPO_ROOT / dirname
+        if not dirpath.is_dir():
+            warn(f"Directory {dirname}/ not found — skipping")
+            continue
+        # os.walk with followlinks=False prevents descending into symlinked dirs
+        for root, dirs, files in os.walk(str(dirpath), followlinks=False):
+            # Prune symlinked subdirectories and sort for deterministic traversal
+            dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(root, d)))
+            for fname in sorted(files):
+                if not fname.endswith(".md"):
+                    continue
+                fpath = Path(root) / fname
+                # Skip symlinked files
+                if fpath.is_symlink():
+                    warn(f"Skipping symlink: {fpath}")
+                    continue
+                # Ensure resolved path stays under repo root
+                try:
+                    fpath.resolve().relative_to(repo_real)
+                except (ValueError, OSError, RuntimeError):
+                    warn(f"Skipping file outside repo or unresolvable: {fpath}")
+                    continue
+                relpath = fpath.relative_to(REPO_ROOT).as_posix()
+                all_files.append((relpath, fpath))
+
+    print(f"📂 Scanning {len(all_files)} files...", file=sys.stderr)
+
+    # ── Parse and validate ──────────────────────────────────────────────
+    records: dict[str, dict] = {}  # relpath -> record
+    has_errors = False
+    tag_usage: dict[str, list[str]] = defaultdict(list)  # tag -> [files]
+
+    for relpath, filepath in all_files:
+        rec = {
+            "path": relpath,
+            "filepath": filepath,
+            "mtime": mtime_date(filepath),
+            "mtime_dt": mtime_datetime(filepath),
+            "frontmatter": None,
+            "errors": [],
+            "warnings": [],
+        }
+
+        fm, parse_err = parse_frontmatter(filepath)
+        if parse_err:
+            rec["errors"].append(parse_err)
+            has_errors = True
+        else:
+            rec["frontmatter"] = fm
+            errs = validate_frontmatter(fm)
+            if errs:
+                rec["errors"].extend(errs)
+                has_errors = True
+
+            # Tag warnings (non-blocking)
+            if fm and "tags" in fm and isinstance(fm["tags"], list):
+                for t in fm["tags"]:
+                    if isinstance(t, str) and TAG_RE.match(t):
+                        tag_usage[t].append(relpath)
+                        if canonical_tags and t not in canonical_tags:
+                            rec["warnings"].append(f"Tag '{t}' not in TAGS.md")
+
+            # Supersedes target existence check
+            if fm and "supersedes" in fm:
+                target = fm["supersedes"]
+                if not isinstance(target, str):
+                    rec["errors"].append(f"'supersedes' must be a string, got {type(target).__name__}")
+                    has_errors = True
+                elif not target:
+                    rec["warnings"].append("'supersedes' is empty — remove or set a valid path")
+                else:
+                    # Validate path safety using PurePosixPath
+                    pp = PurePosixPath(target)
+                    if pp.is_absolute() or ".." in pp.parts or "." in pp.parts or "\\" in target:
+                        rec["errors"].append(f"'supersedes' must be a safe relative repo path, got '{target}'")
+                        has_errors = True
+                    else:
+                        target_path = REPO_ROOT / target
+                        if not target_path.exists():
+                            rec["errors"].append(f"supersedes target '{target}' does not exist")
+                            has_errors = True
+
+        records[relpath] = rec
+
+    # Supersession cycle detection
+    cycle_warnings = detect_supersession_cycles(records)
+    for cw in cycle_warnings:
+        warn(cw)
+
+    # Singleton tag warnings
+    singleton_tags = [(t, files[0]) for t, files in tag_usage.items() if len(files) == 1]
+
+    # ── Build with_fm (moved up for guide second-pass) ──────────────────
+    with_fm = {r: rec for r, rec in records.items() if rec["frontmatter"] is not None and not rec["errors"]}
+
+    # ── Second pass: guide-specific warnings (needs with_fm) ────────────
+    _source_fm_cache: dict[str, dict | None] = {}
+    for relpath, rec in records.items():
+        fm = rec.get("frontmatter")
+        if not fm or rec["errors"] or not relpath.startswith("GUIDES/"):
+            continue
+        guide_status = fm.get("status", "")
+
+        # verified: future date warning
+        verified_val = fm.get("verified")
+        vdate = None
+        if verified_val is not None:
+            if isinstance(verified_val, datetime):
+                vdate = verified_val.date()
+            elif isinstance(verified_val, date):
+                vdate = verified_val
+            elif isinstance(verified_val, str):
+                try:
+                    vdate = datetime.strptime(verified_val, "%Y-%m-%d").date()
+                except ValueError:
+                    pass  # Format error already caught by validate_frontmatter
+            if vdate and vdate > datetime.now().date():
+                rec["warnings"].append("'verified' date is in the future")
+
+        # verified: staleness (only for active guides)
+        if guide_status == "active":
+            if verified_val is None:
+                rec["warnings"].append("Active guide missing 'verified' date")
+            elif vdate:
+                days_old = (datetime.now().date() - vdate).days
+                if days_old > GUIDE_VERIFIED_STALE_DAYS:
+                    rec["warnings"].append(
+                        f"'verified' is {days_old} days old "
+                        f"(threshold: {GUIDE_VERIFIED_STALE_DAYS})")
+
+        # sources: existence and supersession checks
+        if fm.get("sources") and isinstance(fm["sources"], list):
+            for src in fm["sources"]:
+                if not isinstance(src, str):
+                    continue  # Format error already caught
+                src_path = REPO_ROOT / src
+                if not src_path.exists():
+                    rec["warnings"].append(f"Source '{src}' does not exist")
+                elif src in with_fm:
+                    src_status = with_fm[src]["frontmatter"].get("status", "")
+                    if src_status == "superseded":
+                        rec["warnings"].append(
+                            f"Source '{src}' has status: superseded")
+                else:
+                    # Source exists but not in with_fm — parse on demand
+                    # Mirror main scan safety: skip symlinks, ensure under repo
+                    if src_path.is_symlink():
+                        rec["warnings"].append(f"Source '{src}' is a symlink — skipped")
+                        continue
+                    try:
+                        src_path.resolve().relative_to(repo_real)
+                    except (ValueError, OSError, RuntimeError):
+                        rec["warnings"].append(f"Source '{src}' resolves outside repo — skipped")
+                        continue
+                    if src not in _source_fm_cache:
+                        s_fm, s_err = parse_frontmatter(src_path)
+                        _source_fm_cache[src] = s_fm if not s_err else None
+                    cached = _source_fm_cache[src]
+                    if cached is None:
+                        rec["warnings"].append(
+                            f"Source '{src}' exists but frontmatter "
+                            f"could not be parsed")
+                    elif cached.get("status") == "superseded":
+                        rec["warnings"].append(
+                            f"Source '{src}' has status: superseded")
+
+    # Print warnings/errors to stderr
+    for relpath, rec in records.items():
+        for e in rec["errors"]:
+            warn(f"{relpath}: {e}")
+        for w in rec["warnings"]:
+            warn(f"{relpath}: {w}")
+
+    # ── Build reverse supersession map ──────────────────────────────────
+    # If B has supersedes: A, then superseded_by[A] includes B
+    superseded_by: dict[str, list[str]] = defaultdict(list)
+    for relpath, rec in records.items():
+        fm = rec.get("frontmatter")
+        if fm and "supersedes" in fm and isinstance(fm["supersedes"], str):
+            target = fm["supersedes"]
+            superseded_by[target].append(relpath)
+
+    dir_counts = {"GUIDES": 0, "PLANS": 0, "RESEARCH": 0, "WORK_LOGS": 0}
+    for r in with_fm:
+        for d in SCAN_DIRS:
+            if r.startswith(d + "/"):
+                dir_counts[d] += 1
+
+    now = datetime.now()
+    seven_days_ago = now - timedelta(days=7)
+
+    recently_modified = sorted(
+        [(r, rec) for r, rec in with_fm.items() if rec["mtime_dt"] >= seven_days_ago],
+        key=lambda x: x[1]["mtime_dt"],
+        reverse=True,
+    )
+
+    superseded_docs = sorted(
+        [(r, rec) for r, rec in with_fm.items()
+         if rec["frontmatter"].get("status") == "superseded"],
+        key=lambda x: x[0],
+    )
+
+    # ── Generate CATALOG.md ─────────────────────────────────────────────
+    lines: list[str] = []
+
+    def L(s=""):
+        lines.append(s)
+
+    build_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    total_fm = len(with_fm)
+
+    L("# goose Town Knowledge Catalog")
+    L()
+    L("*Auto-generated. Do not edit. Run `uv run scripts/build-catalog` to rebuild.*")
+    L(f"*Last built: {build_time}*")
+    L()
+
+    # ── All Documents ───────────────────────────────────────────────────
+    L(f"## All Documents ({total_fm} files: {dir_counts['GUIDES']} GUIDES, "
+      f"{dir_counts['PLANS']} PLANS, {dir_counts['RESEARCH']} RESEARCH, "
+      f"{dir_counts['WORK_LOGS']} WORK_LOGS)")
+    L()
+    L("| File | Title | Status | Tags | Modified |")
+    L("|------|-------|--------|------|----------|")
+    E = escape_md_cell  # shorthand for table cell escaping
+    for relpath in sorted(with_fm.keys()):
+        rec = with_fm[relpath]
+        fm = rec["frontmatter"]
+        title = E(fm.get("title", ""))
+        status = E(fm.get("status", ""))
+        tags = format_tags(fm.get("tags", []))
+        modified = E(rec["mtime"])
+        L(f"| {E(relpath)} | {title} | {status} | {tags} | {modified} |")
+    L()
+
+    # ── Recently Modified ───────────────────────────────────────────────
+    L("## Recently Modified (Last 7 Days)")
+    L()
+    L("| File | Title | Tags | Modified |")
+    L("|------|-------|------|----------|")
+    if recently_modified:
+        for relpath, rec in recently_modified:
+            fm = rec["frontmatter"]
+            title = E(fm.get("title", ""))
+            tags = format_tags(fm.get("tags", []))
+            modified = E(rec["mtime"])
+            L(f"| {E(relpath)} | {title} | {tags} | {modified} |")
+    else:
+        L("| *(none)* | | | |")
+    L()
+
+    # ── Superseded Documents ────────────────────────────────────────────
+    L("## Superseded Documents")
+    L()
+    L("| File | Superseded By | Tags |")
+    L("|------|--------------|------|")
+    if superseded_docs:
+        for relpath, rec in superseded_docs:
+            fm = rec["frontmatter"]
+            tags = format_tags(fm.get("tags", []))
+            by_list = sorted(superseded_by.get(relpath, []))
+            by = ", ".join(E(b) for b in by_list) if by_list else "*(unknown)*"
+            L(f"| {E(relpath)} | {by} | {tags} |")
+    else:
+        L("| *(none)* | | |")
+    L()
+
+    # ── Tag Index ───────────────────────────────────────────────────────
+    L("## Tag Index")
+    L()
+    L("| Tag | Count | Files |")
+    L("|-----|-------|-------|")
+    sorted_tags = sorted(tag_usage.items(), key=lambda x: (-len(x[1]), x[0]))
+    for tag, files in sorted_tags:
+        count = len(files)
+        escaped_files = [E(f) for f in sorted(files)]
+        if count > 5:
+            shown = ", ".join(escaped_files[:5]) + f" (+{count - 5} more)"
+        else:
+            shown = ", ".join(escaped_files)
+        L(f"| `{E(tag)}` | {count} | {shown} |")
+    if not sorted_tags:
+        L("| *(none)* | | |")
+    L()
+
+    # ── Missing Frontmatter ────────────────────────────────────────────
+    missing_fm = {r: rec for r, rec in records.items()
+                  if r not in with_fm and rec["frontmatter"] is None}
+    invalid_fm = {r: rec for r, rec in records.items()
+                  if r not in with_fm and rec["frontmatter"] is not None}
+
+    L("## Missing Frontmatter")
+    L()
+    L("| File | Modified |")
+    L("|------|----------|")
+    for relpath in sorted(missing_fm.keys()):
+        rec = missing_fm[relpath]
+        L(f"| {E(relpath)} | {E(rec['mtime'])} |")
+    if not missing_fm:
+        L("| *(none)* | |")
+    L()
+
+    # ── Invalid Frontmatter ────────────────────────────────────────────
+    L("## Invalid Frontmatter")
+    L()
+    L("| File | Errors | Modified |")
+    L("|------|--------|----------|")
+    for relpath in sorted(invalid_fm.keys()):
+        rec = invalid_fm[relpath]
+        errs = "; ".join(E(e) for e in rec["errors"])
+        L(f"| {E(relpath)} | {errs} | {E(rec['mtime'])} |")
+    if not invalid_fm:
+        L("| *(none)* | | |")
+    L()
+
+    # ── Statistics ──────────────────────────────────────────────────────
+    status_counts = defaultdict(int)
+    for rec in with_fm.values():
+        s = rec["frontmatter"].get("status", "unknown")
+        status_counts[s] += 1
+
+    unique_tags_used = len(tag_usage)
+    canonical_count = len(canonical_tags)
+
+    L("## Statistics")
+    L()
+    L(f"- With frontmatter: {total_fm} | Missing frontmatter: {len(missing_fm)} | Invalid frontmatter: {len(invalid_fm)}")
+    L(f"- Active: {status_counts.get('active', 0)} | "
+      f"Superseded: {status_counts.get('superseded', 0)} | "
+      f"Stale: {status_counts.get('stale', 0)} | "
+      f"Draft: {status_counts.get('draft', 0)}")
+    L(f"- {canonical_count} canonical tags, {unique_tags_used} unique tags used")
+    if singleton_tags:
+        parts = [f"{t} (1 file)" for t, _ in sorted(singleton_tags)]
+        L(f"- ⚠️ Singleton tags: {', '.join(parts)} — consider merging")
+    L()
+
+    # ── Write CATALOG.md ────────────────────────────────────────────────
+    if CATALOG_MD.is_symlink():
+        print("❌ ERROR: CATALOG.md is a symlink — refusing to write", file=sys.stderr)
+        sys.exit(1)
+    CATALOG_MD.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"✅ CATALOG.md generated ({total_fm} with frontmatter, "
+          f"{len(missing_fm)} missing, {len(invalid_fm)} invalid)", file=sys.stderr)
+
+    # ── Exit code ───────────────────────────────────────────────────────
+    if args.strict and has_errors:
+        print(f"❌ Strict mode: {sum(1 for r in records.values() if r['errors'])} "
+              f"files with errors", file=sys.stderr)
+        sys.exit(1)
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,31 @@
+# Working directories - not tracked
+.scratch/
+GUIDES/
+PLANS/
+REPOS/
+RESEARCH/
+WORK_LOGS/
+
+# Utilities (local tools, not tracked)
+UTILITIES/
+
+# Beads issue tracker
+.beads/
+.beads-ui/
+
+# Knowledge system (local per user, not shared)
+/CATALOG.md
+/TAGS.md
+
+# uv
+.venv/
+
+# Python
+__pycache__/
+
+# OS files
+.DS_Store
+.pytest_cache/
+
+# Secrets
+.env*
