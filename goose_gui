@@ -21,14 +21,24 @@ touch "$TELEPATHY_FILE"
 # Export for tom extension
 export GOOSE_MOIM_MESSAGE_FILE="$TELEPATHY_FILE"
 
+# Generate unique wall file for this session
+WALLS_DIR="${HOME}/.goosetown/walls"
+mkdir -p "$WALLS_DIR"
+WALL_FILE="${WALLS_DIR}/wall-$$-${RANDOM}.log"
+touch "$WALL_FILE"
+export GOOSE_GTWALL_FILE="$WALL_FILE"
+
 # Cleanup on exit
 cleanup() {
     rm -f "$TELEPATHY_FILE"
-    echo "Telepathy file cleaned up." >&2
+    rm -f "$WALL_FILE"
+    rm -rf "${WALL_FILE%.log}.positions"
+    echo "Telepathy and wall files cleaned up." >&2
 }
 trap cleanup EXIT
 
 echo "🦆 Goosetown GUI telepathy enabled: $TELEPATHY_FILE" >&2
+echo "🦆 Goosetown GUI wall enabled: $WALL_FILE" >&2
 echo "Keep this terminal open. Press Ctrl+C when done to clean up." >&2
 
 # Launch GUI with -n to force new instance (ensures env var is picked up)

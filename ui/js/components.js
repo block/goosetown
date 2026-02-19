@@ -221,7 +221,7 @@ function renderBulletin(st) {
           ? html`<div class="bulletin-empty">
             ${
               messages.length === 0
-                ? 'Waiting for wall… (start a goose session or check GOOSE_SERVER__SECRET_KEY)'
+                ? 'Waiting for wall… (start a goose session or check GOOSE_GTWALL_FILE)'
                 : 'No messages match current filters.'
             }
           </div>`

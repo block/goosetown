@@ -80,13 +80,18 @@ def find_parent_session(cur) -> str | None:
 
 
 def find_wall_file(session_key: str | None = None) -> str | None:
-    if session_key is None:
-        secret = os.environ.get("GOOSE_SERVER__SECRET_KEY", "")
-        session_key = secret[:8] if secret else None
+    # Check GOOSE_GTWALL_FILE env var first
+    gtwall_file = os.environ.get("GOOSE_GTWALL_FILE", "")
+    if gtwall_file and os.path.isfile(gtwall_file):
+        return gtwall_file
+    
+    # Fallback: use session_key if provided
     if session_key:
         path = os.path.join(WALLS_DIR, f"wall-{session_key}.log")
         if os.path.isfile(path):
             return path
+    
+    # Last resort: newest wall file
     wall_files = glob.glob(os.path.join(WALLS_DIR, "wall-*.log"))
     return max(wall_files, key=os.path.getmtime) if wall_files else None
 

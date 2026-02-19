@@ -6,7 +6,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DASHBOARD="$SCRIPT_DIR/../dashboard"
 
-export GOOSE_SERVER__SECRET_KEY="dash${$}${RANDOM}"
+# Create unique wall file for this test session
+WALLS_DIR="$HOME/.goosetown/walls"
+mkdir -p "$WALLS_DIR"
+WALL_FILE="${WALLS_DIR}/wall-test-dash-${$}-${RANDOM}.log"
+touch "$WALL_FILE"
+export GOOSE_GTWALL_FILE="$WALL_FILE"
 
 passed=0
 failed=0
@@ -18,6 +23,8 @@ skip() { echo "  ⊘ $1 (skipped: $2)"; ((++skipped)) || true; }
 
 cleanup() {
     "$DASHBOARD" --stop >/dev/null 2>&1 || true
+    rm -f "$WALL_FILE" 2>/dev/null || true
+    rm -rf "${WALL_FILE%.log}.positions" 2>/dev/null || true
 }
 trap cleanup EXIT
 

@@ -6,8 +6,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GTWALL="$SCRIPT_DIR/../gtwall"
 
-# Use unique session key - PID + RANDOM for uniqueness
-export GOOSE_SERVER__SECRET_KEY="gt${$}${RANDOM}"
+# Create unique wall file for this test session
+WALLS_DIR="$HOME/.goosetown/walls"
+mkdir -p "$WALLS_DIR"
+WALL_FILE="${WALLS_DIR}/wall-test-${$}-${RANDOM}.log"
+touch "$WALL_FILE"
+export GOOSE_GTWALL_FILE="$WALL_FILE"
 
 passed=0
 failed=0
@@ -16,9 +20,8 @@ pass() { echo "  ✓ $1"; ((++passed)) || true; }
 fail() { echo "  ✗ $1: $2" >&2; ((++failed)) || true; }
 
 cleanup() {
-    local wall_id="${GOOSE_SERVER__SECRET_KEY:0:8}"
-    rm -rf "$HOME/.goosetown/walls/wall-${wall_id}.log"* 2>/dev/null || true
-    rm -rf "$HOME/.goosetown/walls/positions-${wall_id}" 2>/dev/null || true
+    rm -f "$WALL_FILE" 2>/dev/null || true
+    rm -rf "${WALL_FILE%.log}.positions" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -84,16 +87,17 @@ test_clear() {
 
 test_session_isolation() {
     echo "test_session_isolation"
-    # Keys must differ in first 8 chars
-    local key_a="isola${$}A"
-    local key_b="isolb${$}B"
+    # Create separate wall files for isolation test
+    local wall_a="${WALLS_DIR}/wall-test-isola-${$}.log"
+    local wall_b="${WALLS_DIR}/wall-test-isolb-${$}.log"
+    touch "$wall_a" "$wall_b"
     
-    GOOSE_SERVER__SECRET_KEY="$key_a" "$GTWALL" writer "secret-A" >/dev/null
-    GOOSE_SERVER__SECRET_KEY="$key_b" "$GTWALL" writer "secret-B" >/dev/null
+    GOOSE_GTWALL_FILE="$wall_a" "$GTWALL" writer "secret-A" >/dev/null
+    GOOSE_GTWALL_FILE="$wall_b" "$GTWALL" writer "secret-B" >/dev/null
     
     local outputA outputB
-    outputA=$(GOOSE_SERVER__SECRET_KEY="$key_a" "$GTWALL" reader 2>/dev/null || echo "")
-    outputB=$(GOOSE_SERVER__SECRET_KEY="$key_b" "$GTWALL" reader 2>/dev/null || echo "")
+    outputA=$(GOOSE_GTWALL_FILE="$wall_a" "$GTWALL" reader 2>/dev/null || echo "")
+    outputB=$(GOOSE_GTWALL_FILE="$wall_b" "$GTWALL" reader 2>/dev/null || echo "")
     
     # Each should only see its own
     if [[ "$outputA" != *"secret-B"* && "$outputB" != *"secret-A"* ]]; then
@@ -103,22 +107,17 @@ test_session_isolation() {
     fi
     
     # Cleanup isolation test walls
-    rm -rf "$HOME/.goosetown/walls/wall-${key_a:0:8}.log"* 2>/dev/null || true
-    rm -rf "$HOME/.goosetown/walls/wall-${key_b:0:8}.log"* 2>/dev/null || true
-    rm -rf "$HOME/.goosetown/walls/positions-${key_a:0:8}" 2>/dev/null || true
-    rm -rf "$HOME/.goosetown/walls/positions-${key_b:0:8}" 2>/dev/null || true
+    rm -f "$wall_a" "$wall_b" 2>/dev/null || true
+    rm -rf "${wall_a%.log}.positions" "${wall_b%.log}.positions" 2>/dev/null || true
 }
 
 test_stale_lock_cleanup() {
     echo "test_stale_lock_cleanup"
     "$GTWALL" --clear >/dev/null 2>&1 || true
     
-    # Get correct lock path: ${WALLS_DIR}/wall-${SESSION_ID}.log.lock
-    local wall_id="${GOOSE_SERVER__SECRET_KEY:0:8}"
-    local walls_dir="$HOME/.goosetown/walls"
-    local lock_dir="${walls_dir}/wall-${wall_id}.log.lock"
+    # Get correct lock path from GOOSE_GTWALL_FILE
+    local lock_dir="${WALL_FILE}.lock"
     
-    mkdir -p "$walls_dir"
     mkdir -p "$lock_dir"
     
     # Create stale lock:

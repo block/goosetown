@@ -22,12 +22,22 @@ touch "$TELEPATHY_FILE"
 # Export for tom extension - orchestrator and all delegates will see this
 export GOOSE_MOIM_MESSAGE_FILE="$TELEPATHY_FILE"
 
+# Generate unique wall file for this session
+WALLS_DIR="${HOME}/.goosetown/walls"
+mkdir -p "$WALLS_DIR"
+WALL_FILE="${WALLS_DIR}/wall-$$-${RANDOM}.log"
+touch "$WALL_FILE"
+export GOOSE_GTWALL_FILE="$WALL_FILE"
+
 # Cleanup on exit
 cleanup() {
     rm -f "$TELEPATHY_FILE"
+    rm -f "$WALL_FILE"
+    rm -rf "${WALL_FILE%.log}.positions"
 }
 trap cleanup EXIT
 
 echo "🦆 Goosetown telepathy enabled: $TELEPATHY_FILE" >&2
+echo "🦆 Goosetown wall enabled: $WALL_FILE" >&2
 
 exec "$GOOSE_BIN" "$@"

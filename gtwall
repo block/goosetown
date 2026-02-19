@@ -12,24 +12,25 @@
 WALL_DIR="${GTWALL_DIR:-${HOME}/.goosetown}"
 WALLS_DIR="${WALL_DIR}/walls"
 
-# Use GOOSE_SERVER__SECRET_KEY as session ID - it's unique per goose session
-# and shared by orchestrator + all delegates automatically
-if [[ -n "${GOOSE_SERVER__SECRET_KEY:-}" ]]; then
-    # Use first 8 chars of the UUID for readability
-    SESSION_ID="${GOOSE_SERVER__SECRET_KEY:0:8}"
+# Use GOOSE_GTWALL_FILE if set, otherwise fallback to default wall
+if [[ -n "${GOOSE_GTWALL_FILE:-}" ]]; then
+    WALL_FILE="$GOOSE_GTWALL_FILE"
 else
-    # Fallback for non-goose usage
-    SESSION_ID="default"
+    # Fallback for non-goose usage (manual invocation)
+    mkdir -p "$WALLS_DIR"
+    WALL_FILE="${WALLS_DIR}/wall-default.log"
 fi
 
+# Derive positions directory from wall file path
+POS_DIR="${WALL_FILE%.log}.positions"
+
+# Extract display-friendly session ID from wall filename for help/status text
+SESSION_ID=$(basename "$WALL_FILE" .log | sed 's/^wall-//')
 # Sanitize SESSION_ID to safe filesystem characters (alphanumeric, dash, underscore)
 SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9_-')
 if [[ -z "$SESSION_ID" ]]; then
     SESSION_ID="default"
 fi
-
-WALL_FILE="${WALLS_DIR}/wall-${SESSION_ID}.log"
-POS_DIR="${WALLS_DIR}/positions-${SESSION_ID}"
 
 # Lock management - track if we hold the lock for cleanup
 LOCKFILE_HELD=""
@@ -247,7 +248,11 @@ ID Rules:
 
 Session:
 EOF
-    printf '  Session ID: %s (from GOOSE_SERVER__SECRET_KEY)\n' "$SESSION_ID"
+    if [[ -n "${GOOSE_GTWALL_FILE:-}" ]]; then
+        printf '  Session ID: %s (from GOOSE_GTWALL_FILE)\n' "$SESSION_ID"
+    else
+        printf '  Session ID: %s (default - no GOOSE_GTWALL_FILE set)\n' "$SESSION_ID"
+    fi
     printf '  Wall:       %s\n' "$WALL_FILE"
     printf '  Positions:  %s/\n' "$POS_DIR"
 }
