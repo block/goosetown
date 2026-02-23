@@ -42,7 +42,10 @@ function scheduleRender() {
   requestAnimationFrame(() => {
     scheduled = false;
     const isStandalone = document.body.classList.contains('standalone-village');
-    if (villageEl && (isStandalone || layoutEl?.classList.contains('show-village'))) {
+    if (
+      villageEl &&
+      (isStandalone || layoutEl?.classList.contains('show-village'))
+    ) {
       render(renderVillage(state), villageEl);
     }
     if (registryEl) render(renderRegistry(state), registryEl);
@@ -90,13 +93,20 @@ function normalizeWallMsg(msg) {
 }
 
 function safeParse(json) {
-  try { return JSON.parse(json); } catch { return []; }
+  try {
+    return JSON.parse(json);
+  } catch {
+    return [];
+  }
 }
 
 function parseMessages(data) {
   return (data.messages || []).map((m) => ({
     ...m,
-    content: typeof m.content_json === 'string' ? safeParse(m.content_json) : m.content_json || [],
+    content:
+      typeof m.content_json === 'string'
+        ? safeParse(m.content_json)
+        : m.content_json || [],
   }));
 }
 
@@ -251,7 +261,7 @@ const clickActions = [
       setVillageVisible(isNowVisible);
       update({ villageVisible: isNowVisible || false });
       scheduleRender();
-    }
+    },
   ],
   [
     '.card[data-session-id]',
@@ -298,36 +308,47 @@ const clickActions = [
     },
   ],
   ['.backdrop', () => closeOverlays()],
-  ['[data-action="wall-post"]', () => {
-    state._lastFocusedBeforeDialog = document.activeElement;
-    update({ showWallPost: true });
-    requestAnimationFrame(() => document.getElementById('wall-post-input')?.focus());
-  }],
-  ['[data-action="wall-post-send"]', async () => {
-    const input = document.getElementById('wall-post-input');
-    const msg = input?.value?.trim();
-    if (!msg) return;
-    try {
-      await fetch('/api/wall', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: msg }),
-      });
-    } catch (e) {
-      console.error('[wall-post]', e);
-    }
-    update({ showWallPost: false });
-    state._lastFocusedBeforeDialog?.focus();
-    delete state._lastFocusedBeforeDialog;
-  }],
-  // Dismiss only when clicking the overlay itself or the cancel button — not popup children
-  ['[data-action="wall-post-dismiss"]', (el, e) => {
-    if (e.target === el || e.target.closest('.wall-post-cancel-btn')) {
+  [
+    '[data-action="wall-post"]',
+    () => {
+      state._lastFocusedBeforeDialog = document.activeElement;
+      update({ showWallPost: true });
+      requestAnimationFrame(() =>
+        document.getElementById('wall-post-input')?.focus()
+      );
+    },
+  ],
+  [
+    '[data-action="wall-post-send"]',
+    async () => {
+      const input = document.getElementById('wall-post-input');
+      const msg = input?.value?.trim();
+      if (!msg) return;
+      try {
+        await fetch('/api/wall', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg }),
+        });
+      } catch (e) {
+        console.error('[wall-post]', e);
+      }
       update({ showWallPost: false });
       state._lastFocusedBeforeDialog?.focus();
       delete state._lastFocusedBeforeDialog;
-    }
-  }],
+    },
+  ],
+  // Dismiss only when clicking the overlay itself or the cancel button — not popup children
+  [
+    '[data-action="wall-post-dismiss"]',
+    (el, e) => {
+      if (e.target === el || e.target.closest('.wall-post-cancel-btn')) {
+        update({ showWallPost: false });
+        state._lastFocusedBeforeDialog?.focus();
+        delete state._lastFocusedBeforeDialog;
+      }
+    },
+  ],
 ];
 
 document.addEventListener('click', (e) => {
@@ -348,7 +369,10 @@ document.addEventListener('change', (e) => {
 
 document.addEventListener('keydown', (e) => {
   // Keyboard activation for role="button" elements (a11y)
-  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[role="button"]')) {
+  if (
+    (e.key === 'Enter' || e.key === ' ') &&
+    e.target.matches('[role="button"]')
+  ) {
     e.preventDefault();
     e.target.click();
     return;
@@ -362,12 +386,19 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Tab') {
     const overlay = document.querySelector('.wall-post-overlay');
     if (!overlay) return;
-    const focusable = overlay.querySelectorAll('textarea, button, [tabindex]:not([tabindex="-1"])');
+    const focusable = overlay.querySelectorAll(
+      'textarea, button, [tabindex]:not([tabindex="-1"])'
+    );
     if (!focusable.length) return;
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
   }
   // Enter (without Shift) in wall post textarea triggers send
   if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'wall-post-input') {
@@ -381,8 +412,13 @@ document.addEventListener('keydown', (e) => {
     const idx = tabs.indexOf(e.target);
     let next = -1;
     if (e.key === 'ArrowRight') next = (idx + 1) % tabs.length;
-    else if (e.key === 'ArrowLeft') next = (idx - 1 + tabs.length) % tabs.length;
-    if (next >= 0) { e.preventDefault(); tabs[next].focus(); tabs[next].click(); }
+    else if (e.key === 'ArrowLeft')
+      next = (idx - 1 + tabs.length) % tabs.length;
+    if (next >= 0) {
+      e.preventDefault();
+      tabs[next].focus();
+      tabs[next].click();
+    }
   }
 });
 

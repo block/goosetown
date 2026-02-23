@@ -1,13 +1,13 @@
 import {
-  BuildingBarn,
-  BuildingLibrary,
-  BuildingForge,
-  BuildingFactory,
-  BuildingHall,
-  BuildingTower,
-  BuildingScriptorium,
   BuildingApothecary,
+  BuildingBarn,
+  BuildingFactory,
+  BuildingForge,
+  BuildingHall,
+  BuildingLibrary,
   BuildingMarket,
+  BuildingScriptorium,
+  BuildingTower,
 } from './assets.js';
 
 export const BUILDINGS = Object.freeze({

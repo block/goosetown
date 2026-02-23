@@ -238,7 +238,9 @@ function renderBulletin(st) {
         ? html`<button class="new-messages-pill" data-action="scroll-to-new">↑ ${st.unreadCount} new message${st.unreadCount > 1 ? 's' : ''}</button>`
         : ''
     }
-    ${st.showWallPost ? html`
+    ${
+      st.showWallPost
+        ? html`
       <div class="wall-post-overlay" role="dialog" aria-modal="true" aria-label="Post message to wall" data-action="wall-post-dismiss">
         <div class="wall-post-popup">
           <div class="wall-post-header">Post to Wall</div>
@@ -250,7 +252,9 @@ function renderBulletin(st) {
           </div>
         </div>
       </div>
-    ` : ''}
+    `
+        : ''
+    }
   `;
 }
 

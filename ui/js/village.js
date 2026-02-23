@@ -1,13 +1,13 @@
 import { html, svg } from 'https://cdn.jsdelivr.net/npm/lit-html@3.3.2/+esm';
-import { MAP_CONFIG } from './map.js';
 import { SvgDefs } from './assets.js';
 import {
-  BUILDINGS,
   BUILDING_CHARS,
-  ROLE_TO_BUILDING,
+  BUILDINGS,
   inferRole,
+  ROLE_TO_BUILDING,
 } from './buildings.js';
-import { TILE_SIZE, tileForChar, decoForChar } from './tiles.js';
+import { MAP_CONFIG } from './map.js';
+import { decoForChar, TILE_SIZE, tileForChar } from './tiles.js';
 
 const SPEECH_DURATION_MS = 8000;
 const SPEECH_MAX_LENGTH = 120;
@@ -487,7 +487,8 @@ export function updateVillageState(globalState) {
     const msg = latestBySender.get(senderId);
     if (msg) {
       let text = msg.message;
-      if (text.length > SPEECH_MAX_LENGTH) text = text.substring(0, SPEECH_MAX_LENGTH) + '...';
+      if (text.length > SPEECH_MAX_LENGTH)
+        text = `${text.substring(0, SPEECH_MAX_LENGTH)}...`;
       goose.speech = text;
     } else {
       goose.speech = null;

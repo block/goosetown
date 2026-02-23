@@ -1,12 +1,12 @@
 import {
   html,
-  svg,
   render,
+  svg,
 } from 'https://cdn.jsdelivr.net/npm/lit-html@3.3.2/+esm';
-import { MAP_CONFIG } from './map.js';
 import { SvgDefs } from './assets.js';
-import { BUILDINGS, BUILDING_CHARS } from './buildings.js';
-import { TILE_SIZE, tileForChar, decoForChar } from './tiles.js';
+import { BUILDINGS } from './buildings.js';
+import { MAP_CONFIG } from './map.js';
+import { decoForChar, TILE_SIZE, tileForChar } from './tiles.js';
 
 const GRID_W = 60;
 const GRID_H = 25;

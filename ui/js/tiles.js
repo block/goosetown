@@ -55,7 +55,7 @@ export function decoForChar(char, px, py) {
   switch (char) {
     case 'T': {
       // Deterministic jitter seeded by position to avoid re-render flicker
-      const seed = (px * 7 + py * 13) & 0xFFFF;
+      const seed = (px * 7 + py * 13) & 0xffff;
       const jx = px + ((seed % 10) - 5);
       const jy = py + (((seed >> 4) % 10) - 5) - 20;
       return svg`<use href="#tree-pine" x="${jx}" y="${jy}"/>`;
