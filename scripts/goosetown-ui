@@ -24,6 +24,10 @@ from starlette.staticfiles import StaticFiles
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
+        # NOTE: 'unsafe-inline' for style-src is required because lit-html applies
+        # inline styles for dynamic transforms (goose animation positions) and
+        # layout. Removing it would require refactoring all inline styles to CSS
+        # classes or JS-managed stylesheets.
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self' https://cdn.jsdelivr.net; "
@@ -497,7 +501,11 @@ async def messages_endpoint(request):
 
 
 async def wall_post_endpoint(request):
-    """Post a message to gtwall. Shells out to ./gtwall — no duplicated logic."""
+    """Post a message to gtwall as 'user'. Shells out to ./gtwall — no duplicated logic.
+
+    NOTE: This endpoint has no authentication. It is safe only because the server
+    binds to 127.0.0.1 (localhost). Do not expose to a network without adding auth.
+    """
     try:
         body = await request.json()
         message = body.get("message", "").strip()

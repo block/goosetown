@@ -101,11 +101,7 @@ function parseMessages(data) {
 }
 
 function connectSSE() {
-  const ps = new URLSearchParams(location.search).get('parent_session');
-  const url = ps
-    ? `/events?parent_session=${encodeURIComponent(ps)}`
-    : '/events';
-  const es = new EventSource(url);
+  const es = new EventSource('/events');
 
   es.onopen = () => {
     update({ connected: true });
@@ -253,6 +249,7 @@ const clickActions = [
       layoutEl?.classList.toggle('show-village');
       const isNowVisible = layoutEl?.classList.contains('show-village');
       setVillageVisible(isNowVisible);
+      update({ villageVisible: isNowVisible || false });
       scheduleRender();
     }
   ],
@@ -379,7 +376,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   // Arrow key navigation for ARIA tabs
-  if (e.target.role === 'tab') {
+  if (e.target.getAttribute('role') === 'tab') {
     const tabs = [...e.target.parentElement.querySelectorAll('[role="tab"]')];
     const idx = tabs.indexOf(e.target);
     let next = -1;

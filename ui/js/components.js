@@ -197,7 +197,7 @@ function renderBulletin(st) {
       <h2>Goosetown</h2>
       ${lantern(st.connected ? 'active' : 'error')}
       <span style="flex:1"></span>
-      <button class="btn-toggle-village" data-action="toggle-village">Village</button>
+      <button class="btn-toggle-village" data-action="toggle-village" aria-expanded="${st.villageVisible ? 'true' : 'false'}">Village</button>
       <a href="/ui/village.html" target="_blank" rel="noopener noreferrer" class="btn-toggle-village" style="text-decoration: none;" title="Open fullscreen village" aria-label="Open fullscreen village">⛶</a>
       <button class="btn-toggle-village" data-action="wall-post" title="Post to wall" aria-label="Post message to wall">📝</button>
     </div>
@@ -213,7 +213,7 @@ function renderBulletin(st) {
       `
       )}
     </div>
-    <div class="bulletin-feed">
+    <div class="bulletin-feed" role="log" aria-live="polite" aria-relevant="additions">
       ${
         filtered.length === 0
           ? html`<div class="bulletin-empty">
@@ -242,7 +242,7 @@ function renderBulletin(st) {
       <div class="wall-post-overlay" role="dialog" aria-modal="true" aria-label="Post message to wall" data-action="wall-post-dismiss">
         <div class="wall-post-popup">
           <div class="wall-post-header">Post to Wall</div>
-          <textarea class="wall-post-input" id="wall-post-input"
+          <textarea class="wall-post-input" id="wall-post-input" aria-label="Wall message"
                     placeholder="Type your message..." rows="3"></textarea>
           <div class="wall-post-actions">
             <button data-action="wall-post-send">Send</button>

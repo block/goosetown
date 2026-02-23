@@ -428,8 +428,8 @@ export function updateVillageState(globalState) {
       goose.targetGridX !== targetBuilding.gridX ||
       goose.targetGridY !== targetBuilding.gridY;
     if (wantsNewTarget) {
-      const currentGridX = Math.round(goose.x / TILE_SIZE);
-      const currentGridY = Math.round(goose.y / TILE_SIZE);
+      const currentGridX = Math.floor(goose.x / TILE_SIZE);
+      const currentGridY = Math.floor(goose.y / TILE_SIZE);
 
       const path = findPath(
         currentGridX,
@@ -531,7 +531,7 @@ export function renderVillage(globalState) {
               ${
                 g.speech
                   ? svg`
-                    <foreignObject x="-100" y="-90" width="200" height="60" style="overflow: visible;">
+                    <foreignObject x="-100" y="-60" width="200" height="40" style="overflow: visible;">
                       <!-- g.speech is auto-escaped by lit-html's tagged template — safe against XSS. -->
                       <!-- Do NOT use unsafeHTML here; wall messages are untrusted user input. -->
                       <div class="v-speech"><span class="v-speech-inner">${g.speech}</span></div>
