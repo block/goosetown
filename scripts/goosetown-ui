@@ -9,9 +9,34 @@ from pathlib import Path
 
 import uvicorn
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, RedirectResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+
+
+# Security model: This server is designed for localhost-only use (binds to 127.0.0.1).
+# It has no authentication, no CORS restrictions, and serves all session data to any
+# connecting client. Do not expose to a network without adding auth and access controls.
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src https://fonts.gstatic.com; "
+            "connect-src 'self'; "
+            "img-src 'self' data:; "
+            "object-src 'none'; "
+            "base-uri 'none'; "
+            "frame-ancestors 'none'; "
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
@@ -22,6 +47,8 @@ WALLS_DIR = os.path.expanduser("~/.goosetown/walls")
 CHILD_PATTERN = re.compile(r"Task (\d{8}_\d+) started in background")
 GTWALL_ID_PATTERN = re.compile(r"Your gtwall ID is (\S+)")
 DELEGATE_NAME_PATTERN = re.compile(r"You are (\S+)\.")
+# IMPORTANT: These patterns are duplicated in ui/js/buildings.js (inferRole function).
+# If you change patterns here, update the JS version to match.
 ROLE_PATTERNS = {
     "orchestrator": re.compile(r"orchestrat", re.I),
     "researcher": re.compile(r"research", re.I),
@@ -395,6 +422,8 @@ async def sessions_tree_watcher():
 
 # ── SSE Endpoint ────────────────────────────────────────────────────────────
 async def sse_endpoint(request):
+    if len(clients) > 50:
+        return JSONResponse({"error": "too many connections"}, status_code=503)
     queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
     clients.append(queue)
     last_event_id = request.headers.get("Last-Event-ID")
@@ -438,10 +467,12 @@ async def sse_endpoint(request):
 # ── REST ────────────────────────────────────────────────────────────────────
 async def messages_endpoint(request):
     sid = request.path_params["session_id"]
+    if not re.match(r'^[a-zA-Z0-9_-]{1,128}$', sid):
+        return JSONResponse({"error": "invalid session id"}, status_code=400)
     before = request.query_params.get("before")
 
     try:
-        limit = min(int(request.query_params.get("limit", "100")), 500)
+        limit = max(1, min(int(request.query_params.get("limit", "100")), 500))
         with db() as cur:
             if before:
                 cur.execute(
@@ -458,14 +489,49 @@ async def messages_endpoint(request):
                 )
             rows = [{"id": r[0], "role": r[1], "content_json": r[2], "created_timestamp": r[3]} for r in cur.fetchall()]
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        print(f"⚠️  messages_endpoint error: {e}", file=sys.stderr)
+        return JSONResponse({"error": "internal error"}, status_code=500)
 
     rows.reverse()
     return JSONResponse({"session_id": sid, "messages": rows, "has_more": len(rows) == limit})
 
 
+async def wall_post_endpoint(request):
+    """Post a message to gtwall. Shells out to ./gtwall — no duplicated logic."""
+    try:
+        body = await request.json()
+        message = body.get("message", "").strip()
+        if not message:
+            return JSONResponse({"error": "empty message"}, status_code=400)
+        if len(message) > 4096:
+            return JSONResponse({"error": "message too long (max 4096 chars)"}, status_code=400)
+
+        wall_file = config.get("wall_file", "")
+        if not wall_file:
+            return JSONResponse({"error": "no wall file configured"}, status_code=503)
+
+        gtwall_path = os.path.join(PROJECT_DIR, "gtwall")
+        env = {**os.environ, "GOOSE_GTWALL_FILE": wall_file}
+        proc = await asyncio.create_subprocess_exec(
+            gtwall_path, "user", message,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.wait()
+        if proc.returncode != 0:
+            stderr_output = (await proc.stderr.read()).decode().strip()
+            print(f"⚠️  gtwall failed (rc={proc.returncode}): {stderr_output}", file=sys.stderr)
+            return JSONResponse({"error": "failed to post message"}, status_code=500)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        print(f"⚠️  wall_post error: {e}", file=sys.stderr)
+        return JSONResponse({"error": "internal error"}, status_code=500)
+
+
 async def config_endpoint(request):
-    return JSONResponse(config)
+    safe_keys = ("wall_id", "port", "parent_session_id")
+    return JSONResponse({k: config[k] for k in safe_keys if k in config})
 
 
 async def root_redirect(request):
@@ -480,10 +546,11 @@ def create_app() -> Starlette:
             Route("/", root_redirect),
             Route("/events", sse_endpoint),
             Route("/api/messages/{session_id}", messages_endpoint),
+            Route("/api/wall", wall_post_endpoint, methods=["POST"]),
             Route("/api/config", config_endpoint),
             Mount("/ui", StaticFiles(directory=ui_dir), name="ui"),
         ],
-
+        middleware=[Middleware(SecurityHeadersMiddleware)],
         on_startup=[start_background_tasks],
     )
 

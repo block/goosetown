@@ -4,6 +4,7 @@ import DOMPurify from 'https://cdn.jsdelivr.net/npm/dompurify@3.2.4/+esm';
 import { html } from 'https://cdn.jsdelivr.net/npm/lit-html@3.3.2/+esm';
 import { unsafeHTML } from 'https://cdn.jsdelivr.net/npm/lit-html@3.3.2/directives/unsafe-html.js/+esm';
 import { Marked } from 'https://cdn.jsdelivr.net/npm/marked@15.0.12/+esm';
+import { inferRole } from './buildings.js';
 
 // ─── Markdown ────────────────────────────────────────────────────────
 const marked = new Marked({ breaks: true, gfm: true });
@@ -33,6 +34,8 @@ const FILTER_ROLES = [
   { key: 'researcher', label: '🔍 Researchers' },
   { key: 'worker', label: '🔧 Workers' },
   { key: 'reviewer', label: '📋 Reviewers' },
+  { key: 'writer', label: '✍️ Writers' },
+  { key: 'generic', label: '🪿 Generic' },
 ];
 
 function formatTokens(n) {
@@ -48,17 +51,6 @@ function formatElapsed(seconds) {
   return `${m}m ${String(s).padStart(2, '0')}s`;
 }
 
-function inferRole(name) {
-  if (!name) return 'generic';
-  const n = name.toLowerCase();
-  if (/orchestrat/.test(n)) return 'orchestrator';
-  if (/research/.test(n)) return 'researcher';
-  if (/worker|build|implement/.test(n)) return 'worker';
-  if (/review|crossfire/.test(n)) return 'reviewer';
-  if (/writ|spec|document/.test(n)) return 'writer';
-  return 'generic';
-}
-
 function inferMessageType(msg) {
   if (!msg) return 'note';
   const t = msg.trimStart();
@@ -72,7 +64,7 @@ function inferMessageType(msg) {
 
 const avatar = (role) => AVATARS[role] || AVATARS.generic;
 const lantern = (status) =>
-  html`<span class="lantern lantern-${status || 'idle'}"></span>`;
+  html`<span class="lantern lantern-${status || 'idle'}" role="img" aria-label="${status || 'idle'} status"></span>`;
 const delegateRole = (d) => inferRole(d.role || d.id);
 const delegateName = (d) => d.gtwall_id || d.role || d.id;
 
@@ -109,7 +101,7 @@ function delegateCard(delegate, selected) {
       : '';
 
   return html`
-    <div class=${cls} data-session-id=${delegate.id}>
+    <div class=${cls} tabindex="0" role="button" data-session-id=${delegate.id}>
       ${lantern(delegate.status)}
       <div class="card-header">
         <span class="card-avatar">${avatar(role)}</span>
@@ -176,7 +168,7 @@ function wallMessage(msg, st, isNew = false) {
   return html`
     <div class=${cls}>
       <div class="bubble-header">
-        <span class="bubble-sender" data-sender-id=${msg.sender_id}>
+        <span class="bubble-sender" role="button" tabindex="0" data-sender-id=${msg.sender_id}>
           ${avatar(role)} ${msg.sender_id}
         </span>
         <span class="bubble-time">${msg.time}</span>
@@ -204,13 +196,19 @@ function renderBulletin(st) {
     <div class="bulletin-header">
       <h2>Goosetown</h2>
       ${lantern(st.connected ? 'active' : 'error')}
+      <span style="flex:1"></span>
+      <button class="btn-toggle-village" data-action="toggle-village">Village</button>
+      <a href="/ui/village.html" target="_blank" rel="noopener noreferrer" class="btn-toggle-village" style="text-decoration: none;" title="Open fullscreen village" aria-label="Open fullscreen village">⛶</a>
+      <button class="btn-toggle-village" data-action="wall-post" title="Post to wall" aria-label="Post message to wall">📝</button>
     </div>
     <div class="filter-bar">
       <button class="filter-btn ${filters.size === 0 ? 'active' : ''}"
+              aria-pressed="${filters.size === 0 ? 'true' : 'false'}"
               data-filter="all">All</button>
       ${FILTER_ROLES.map(
         (r) => html`
         <button class="filter-btn ${filters.has(r.key) ? 'active' : ''}"
+                aria-pressed="${filters.has(r.key) ? 'true' : 'false'}"
                 data-filter=${r.key}>${r.label}</button>
       `
       )}
@@ -237,9 +235,22 @@ function renderBulletin(st) {
     </div>
     ${
       st.unreadCount > 0
-        ? html`<div class="new-messages-pill">↑ ${st.unreadCount} new message${st.unreadCount > 1 ? 's' : ''}</div>`
+        ? html`<button class="new-messages-pill" data-action="scroll-to-new">↑ ${st.unreadCount} new message${st.unreadCount > 1 ? 's' : ''}</button>`
         : ''
     }
+    ${st.showWallPost ? html`
+      <div class="wall-post-overlay" role="dialog" aria-modal="true" aria-label="Post message to wall" data-action="wall-post-dismiss">
+        <div class="wall-post-popup">
+          <div class="wall-post-header">Post to Wall</div>
+          <textarea class="wall-post-input" id="wall-post-input"
+                    placeholder="Type your message..." rows="3"></textarea>
+          <div class="wall-post-actions">
+            <button data-action="wall-post-send">Send</button>
+            <button class="wall-post-cancel-btn" data-action="wall-post-dismiss">Cancel</button>
+          </div>
+        </div>
+      </div>
+    ` : ''}
   `;
 }
 
@@ -398,7 +409,7 @@ function renderWorkshop(st) {
         <span class="card-avatar">${avatar(role)}</span>
         <span class="workshop-name">${delegateName(delegate)}</span>
       </div>
-      <button class="workshop-close" data-action="close-workshop">×</button>
+      <button class="workshop-close" data-action="close-workshop" aria-label="Close workshop panel">×</button>
     </div>
     <div class="workshop-status">
       <span class="badge role-${role}">${role}</span>
@@ -410,15 +421,18 @@ function renderWorkshop(st) {
       }
       <span class="workshop-tokens">${formatTokens(delegate.tokens)} tok</span>
     </div>
-    <div class="tab-bar">
+    <div class="tab-bar" role="tablist">
       ${tabs.map(
         (tab) => html`
         <button class="tab ${st.activeTab === tab ? 'active' : ''}"
+                id="tab-${tab}"
+                role="tab" aria-selected="${st.activeTab === tab ? 'true' : 'false'}"
+                tabindex="${st.activeTab === tab ? '0' : '-1'}"
                 data-tab=${tab}>${tab[0].toUpperCase() + tab.slice(1)}</button>
       `
       )}
     </div>
-    <div class="workshop-content">
+    <div class="workshop-content" role="tabpanel" aria-labelledby="tab-${st.activeTab}">
       ${(
         {
           overview: () => overviewTab(delegate),

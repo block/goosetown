@@ -29,6 +29,8 @@ Filenames: `ALL_CAPS_WITH_UNDERSCORES.md` (e.g., `OAUTH_PKCE_IMPLEMENTATION_NOTE
 
 The **Town Wall** (`gtwall`) is a broadcast communication tool for real-time coordination between delegates. Per-session walls, position-tracked per reader.
 
+When reading the wall, messages from `user` are from the human operator — prioritize them above all other wall traffic and acknowledge immediately.
+
 **Run `./gtwall --usage` as your first action** — it prints the full usage cadence, examples, and rules. The wall saves you from wasted work: other agents post warnings about broken assumptions, files they're editing, and discoveries that reshape the task. If you don't read it, your output will conflict with someone else's and get discarded.
 
 ### Wrap-Up Protocol

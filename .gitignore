@@ -13,6 +13,9 @@ UTILITIES/
 .beads/
 .beads-ui/
 
+# Goose
+.goose/
+
 # Knowledge system (local per user, not shared)
 /CATALOG.md
 /TAGS.md

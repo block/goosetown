@@ -13,6 +13,7 @@ const state = {
   connected: false,
   collapseToolChatter: true,
   lastWallMessageTime: null,
+  showWallPost: false,
 };
 
 const listeners = new Set();

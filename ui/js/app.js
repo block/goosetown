@@ -8,6 +8,7 @@ import {
   renderWorkshop,
 } from './components.js';
 import { state, subscribe, toggleFilter, update } from './state.js';
+import { renderVillage, setVillageVisible } from './village.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -16,6 +17,7 @@ const registryEl = $('.registry');
 const bulletinEl = $('.bulletin');
 const workshopEl = $('.workshop');
 const clockworksEl = $('.clockworks');
+const villageEl = $('#village-container');
 const isDesktop = () => matchMedia('(min-width: 1201px)').matches;
 
 // Inject hamburger + backdrop if missing from HTML
@@ -39,6 +41,10 @@ function scheduleRender() {
   scheduled = true;
   requestAnimationFrame(() => {
     scheduled = false;
+    const isStandalone = document.body.classList.contains('standalone-village');
+    if (villageEl && (isStandalone || layoutEl?.classList.contains('show-village'))) {
+      render(renderVillage(state), villageEl);
+    }
     if (registryEl) render(renderRegistry(state), registryEl);
     if (bulletinEl) render(renderBulletin(state), bulletinEl);
     if (workshopEl) render(renderWorkshop(state), workshopEl);
@@ -79,16 +85,18 @@ function normalizeWallMsg(msg) {
     time: msg.time || '',
     sender_id: msg.sender_id || '',
     message: msg.message || '',
+    _receivedAt: Date.now(),
   };
+}
+
+function safeParse(json) {
+  try { return JSON.parse(json); } catch { return []; }
 }
 
 function parseMessages(data) {
   return (data.messages || []).map((m) => ({
     ...m,
-    content:
-      typeof m.content_json === 'string'
-        ? JSON.parse(m.content_json)
-        : m.content_json || [],
+    content: typeof m.content_json === 'string' ? safeParse(m.content_json) : m.content_json || [],
   }));
 }
 
@@ -134,6 +142,7 @@ function connectSSE() {
     };
     if (!nearTop) patch.unreadCount = state.unreadCount + 1;
     update(patch);
+    setTimeout(scheduleRender, 8100);
     if (nearTop && feed) {
       requestAnimationFrame(() =>
         feed.scrollTo({ top: 0, behavior: 'smooth' })
@@ -169,6 +178,7 @@ async function selectDelegate(sessionId) {
     const resp = await fetch(`/api/messages/${sessionId}?limit=100`);
     if (!resp.ok) return;
     const data = await resp.json();
+    if (state.selectedDelegate !== sessionId) return; // stale response — user switched delegates
     update({
       delegateMessages: parseMessages(data),
       delegateHasMore: data.has_more || false,
@@ -189,6 +199,7 @@ async function loadOlderMessages() {
     );
     if (!resp.ok) return;
     const data = await resp.json();
+    if (state.selectedDelegate !== sid) return; // stale response — user switched delegates
     update({
       delegateMessages: [...parseMessages(data), ...msgs],
       delegateHasMore: data.has_more || false,
@@ -237,6 +248,15 @@ function closeOverlays() {
 
 const clickActions = [
   [
+    '.btn-toggle-village[data-action="toggle-village"]',
+    () => {
+      layoutEl?.classList.toggle('show-village');
+      const isNowVisible = layoutEl?.classList.contains('show-village');
+      setVillageVisible(isNowVisible);
+      scheduleRender();
+    }
+  ],
+  [
     '.card[data-session-id]',
     (el) => {
       const sid = el.dataset.sessionId;
@@ -281,13 +301,43 @@ const clickActions = [
     },
   ],
   ['.backdrop', () => closeOverlays()],
+  ['[data-action="wall-post"]', () => {
+    state._lastFocusedBeforeDialog = document.activeElement;
+    update({ showWallPost: true });
+    requestAnimationFrame(() => document.getElementById('wall-post-input')?.focus());
+  }],
+  ['[data-action="wall-post-send"]', async () => {
+    const input = document.getElementById('wall-post-input');
+    const msg = input?.value?.trim();
+    if (!msg) return;
+    try {
+      await fetch('/api/wall', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: msg }),
+      });
+    } catch (e) {
+      console.error('[wall-post]', e);
+    }
+    update({ showWallPost: false });
+    state._lastFocusedBeforeDialog?.focus();
+    delete state._lastFocusedBeforeDialog;
+  }],
+  // Dismiss only when clicking the overlay itself or the cancel button — not popup children
+  ['[data-action="wall-post-dismiss"]', (el, e) => {
+    if (e.target === el || e.target.closest('.wall-post-cancel-btn')) {
+      update({ showWallPost: false });
+      state._lastFocusedBeforeDialog?.focus();
+      delete state._lastFocusedBeforeDialog;
+    }
+  }],
 ];
 
 document.addEventListener('click', (e) => {
   for (const [sel, handler] of clickActions) {
     const match = e.target.closest(sel);
     if (match) {
-      handler(match);
+      handler(match, e);
       return;
     }
   }
@@ -296,6 +346,46 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', (e) => {
   if (e.target.dataset.action === 'toggle-chatter') {
     update({ collapseToolChatter: e.target.checked });
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  // Keyboard activation for role="button" elements (a11y)
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[role="button"]')) {
+    e.preventDefault();
+    e.target.click();
+    return;
+  }
+  if (e.key === 'Escape' && state.showWallPost) {
+    update({ showWallPost: false });
+    state._lastFocusedBeforeDialog?.focus();
+    delete state._lastFocusedBeforeDialog;
+  }
+  // Focus trap for wall-post dialog
+  if (e.key === 'Tab') {
+    const overlay = document.querySelector('.wall-post-overlay');
+    if (!overlay) return;
+    const focusable = overlay.querySelectorAll('textarea, button, [tabindex]:not([tabindex="-1"])');
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+  // Enter (without Shift) in wall post textarea triggers send
+  if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'wall-post-input') {
+    e.preventDefault();
+    document.querySelector('[data-action="wall-post-send"]')?.click();
+    return;
+  }
+  // Arrow key navigation for ARIA tabs
+  if (e.target.role === 'tab') {
+    const tabs = [...e.target.parentElement.querySelectorAll('[role="tab"]')];
+    const idx = tabs.indexOf(e.target);
+    let next = -1;
+    if (e.key === 'ArrowRight') next = (idx + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') next = (idx - 1 + tabs.length) % tabs.length;
+    if (next >= 0) { e.preventDefault(); tabs[next].focus(); tabs[next].click(); }
   }
 });
 
@@ -313,6 +403,16 @@ document.addEventListener(
   },
   true
 );
+
+// Listen for custom render events (e.g., from village animations)
+document.addEventListener('goosetown-render', () => {
+  scheduleRender();
+});
+
+// In standalone-village mode the village is always visible — start animation loop
+if (document.body.classList.contains('standalone-village')) {
+  setVillageVisible(true);
+}
 
 connectSSE();
 updateTabTitle();

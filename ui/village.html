@@ -3,21 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Goosetown</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚙️</text></svg>">
+  <title>Goosetown Village</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪿</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/ui/css/steampunk.css">
   <link rel="stylesheet" href="/ui/css/village.css">
 </head>
-<body>
-  <div class="layout">
-    <div id="village-container"></div>
-    <aside class="registry" id="registry"></aside>
-    <main class="bulletin" id="bulletin"></main>
-    <aside class="workshop" id="workshop"></aside>
-    <footer class="clockworks" id="clockworks"></footer>
-  </div>
+<body class="standalone-village">
+  <!-- We use the same layout class but hide everything else via CSS or just omit them -->
+  <div id="village-container"></div>
   <script type="module" src="/ui/js/app.js"></script>
 </body>
 </html>
