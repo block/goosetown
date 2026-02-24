@@ -148,6 +148,7 @@ function connectSSE() {
     };
     if (!nearTop) patch.unreadCount = state.unreadCount + 1;
     update(patch);
+    // Re-render after speech bubble expires (SPEECH_DURATION_MS=8000 + 100ms buffer)
     setTimeout(scheduleRender, 8100);
     if (nearTop && feed) {
       requestAnimationFrame(() =>
@@ -325,13 +326,20 @@ const clickActions = [
       const msg = input?.value?.trim();
       if (!msg) return;
       try {
-        await fetch('/api/wall', {
+        const resp = await fetch('/api/wall', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: msg }),
         });
+        if (!resp.ok) {
+          console.error('[wall-post] server returned', resp.status);
+          input?.focus();
+          return;
+        }
       } catch (e) {
         console.error('[wall-post]', e);
+        input?.focus();
+        return;
       }
       update({ showWallPost: false });
       state._lastFocusedBeforeDialog?.focus();
