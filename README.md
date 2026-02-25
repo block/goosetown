@@ -85,7 +85,11 @@ When three or more delegates share a task and coordinate via gtwall, that's a *f
 - **gtwall** — the Town Wall; broadcast channel for real-time delegate coordination
 - **Telepathy** — orchestrator → delegate push messages for urgent paging
 
-There's a real-time dashboard for watching your flock work — just ask goose to launch it.
+There's a real-time dashboard for watching your flock work (yes, they're actual geese on a map) — just ask goose to launch it.
+
+<p align="center">
+  <img src="goosetown-dashboard.png" alt="Goosetown Village Dashboard — real-time agent coordination view" style="max-width: 720px; width: 100%;" />
+</p>
 
 Learn more in [AGENTS.md](AGENTS.md).
 

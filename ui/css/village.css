@@ -1,0 +1,253 @@
+/* ==========================================================================
+   Goosetown Village — SVG RPG Town
+   ========================================================================== */
+
+.village-viewport {
+  width: 100%; height: 100%; position: relative; overflow: hidden;
+  background: #7CB342; font-family: 'JetBrains Mono', monospace;
+  display: flex; align-items: center; justify-content: center;
+}
+
+.terrain-layer {
+  width: 100%; height: 100%;
+}
+
+.village-viewport:not(.day) .terrain-layer {
+  filter: brightness(0.7) sepia(0.2) hue-rotate(-10deg);
+}
+
+.v-building-art {
+  filter: drop-shadow(0 15px 10px rgba(0,0,0,0.4));
+  transform-origin: bottom center;
+}
+
+.v-building-label {
+  display: inline-block;
+  background: rgba(0,0,0,0.8); color: #FFF;
+  padding: 6px 10px; border: 1px solid var(--copper); border-radius: 4px;
+  font-size: 13px; white-space: nowrap;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+}
+
+.v-goose-wrapper {
+  position: absolute; z-index: 10;
+  transition: opacity 0.5s;
+}
+
+.v-goose-anim {
+  transform-origin: bottom center;
+  filter: drop-shadow(0 10px 5px rgba(0,0,0,0.4));
+}
+
+.v-goose-anim.walking { animation: waddle 0.3s infinite alternate ease-in-out; }
+.v-goose-anim.working { animation: bob 0.8s infinite; }
+
+.v-goose-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+@keyframes waddle {
+  from { transform: rotate(-8deg); }
+  to { transform: rotate(8deg); }
+}
+@keyframes bob {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.9) translateY(4px); }
+}
+
+/* Smoke and Fire */
+.anim-smoke { animation: float-up 2.5s infinite linear; }
+.anim-smoke:nth-child(2) { animation-delay: 1.2s; }
+@keyframes float-up {
+  0% { transform: translateY(0) scale(1); opacity: 0.8; }
+  100% { transform: translateY(-30px) scale(1.5); opacity: 0; }
+}
+
+.anim-flicker { animation: flicker 0.6s infinite alternate; }
+@keyframes flicker {
+  0% { opacity: 0.8; }
+  100% { opacity: 1; filter: brightness(1.3); }
+}
+
+.anim-fountain {
+  animation: fountain-spray 1.5s infinite alternate ease-in-out;
+  transform-origin: 40px 40px;
+}
+@keyframes fountain-spray {
+  0% { transform: scaleY(1); opacity: 0.7; }
+  100% { transform: scaleY(1.2); opacity: 0.9; }
+}
+
+/* Swimming Goose & Pond */
+.anim-ripple {
+  transform-origin: 20px 20px;
+  animation: ripple 2.5s infinite linear;
+}
+.anim-ripple-delay {
+  transform-origin: 20px 20px;
+  animation: ripple 2.5s infinite linear;
+  animation-delay: 1.25s;
+}
+@keyframes ripple {
+  0% { transform: scale(0.5); opacity: 0.8; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+.anim-swim-bob {
+  animation: swim-bob 2s infinite alternate ease-in-out;
+}
+@keyframes swim-bob {
+  0% { transform: translate(-10px, -20px) rotate(-2deg); }
+  100% { transform: translate(-10px, -18px) rotate(2deg); }
+}
+
+.anim-wander {
+  animation: wander 8s infinite alternate ease-in-out;
+}
+@keyframes wander {
+  0% { transform: translateX(-5px); }
+  100% { transform: translateX(15px); }
+}
+
+.anim-farm-wander {
+  animation: farm-wander 24s infinite linear;
+}
+@keyframes farm-wander {
+  0%   { transform: translate(0px, 0px) scaleX(1); }
+  20%  { transform: translate(200px, 0px) scaleX(1); }
+  22%  { transform: translate(200px, 40px) scaleX(-1); }
+  42%  { transform: translate(0px, 40px) scaleX(-1); }
+  44%  { transform: translate(0px, 80px) scaleX(1); }
+  64%  { transform: translate(200px, 80px) scaleX(1); }
+  66%  { transform: translate(200px, 120px) scaleX(-1); }
+  86%  { transform: translate(0px, 120px) scaleX(-1); }
+  88%  { transform: translate(0px, 0px) scaleX(1); }
+  100% { transform: translate(0px, 0px) scaleX(1); }
+}
+
+/* UI Elements */
+.v-speech {
+  position: absolute; bottom: 100%; left: 50%; transform: translate(-50%, -10px);
+  background: #fff; color: #000; border: 3px solid #000;
+  padding: 8px 12px; border-radius: 6px; font-size: 13px; font-weight: bold;
+  white-space: normal; word-wrap: break-word; max-width: 200px; width: max-content;
+  box-shadow: 4px 4px 0 rgba(0,0,0,0.5);
+  animation: pop 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+.v-speech::after {
+  content: ''; position: absolute; bottom: -9px; left: 50%; margin-left: -6px;
+  border-width: 6px 6px 0 0; border-style: solid; border-color: #000 transparent transparent transparent;
+}
+.v-speech-inner { display: contents; }
+.v-speech-inner::after {
+  content: ''; position: absolute; bottom: -4px; left: 50%; margin-left: -4px;
+  border-width: 4px 4px 0 0; border-style: solid; border-color: #fff transparent transparent transparent; z-index: 21;
+}
+@keyframes pop {
+  0% { transform: translate(-50%, 0px) scale(0); }
+  100% { transform: translate(-50%, -10px) scale(1); }
+}
+
+.v-nameplate {
+  display: inline-block;
+  background: rgba(0,0,0,0.8); color: #fff; font-size: 10px;
+  padding: 2px 6px; border: 1px solid var(--copper); border-radius: 4px; white-space: nowrap;
+}
+
+.layout.show-village { grid-template-rows: 55vh 1fr auto; grid-template-areas: "village village village" "registry bulletin workshop" "clockworks clockworks clockworks"; }
+#village-container { display: none; grid-area: village; border-bottom: 2px solid var(--border-active); }
+.layout.show-village #village-container { display: block; }
+.btn-toggle-village { margin-left: auto; background: var(--bg-card); color: var(--copper-light); border: 1px solid var(--border-default); padding: 4px 8px; font-family: var(--font-mono); font-size: var(--fs-sm); cursor: pointer; border-radius: var(--radius-sm); transition: all 0.2s; }
+.btn-toggle-village:hover { background: var(--bg-input); color: var(--copper); border-color: var(--copper); }
+body.standalone-village { margin: 0; padding: 0; width: 100vw; height: 100vh; overflow: hidden; }
+body.standalone-village #village-container { display: block; width: 100%; height: 100%; border: none; }
+
+/* ─── Wall Post Overlay ─────────────────────────────────────── */
+
+.wall-post-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wall-post-popup {
+  background: var(--bg-secondary);
+  border: 2px solid var(--copper);
+  border-radius: 8px;
+  padding: 20px;
+  width: 400px;
+  max-width: 90vw;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.wall-post-header {
+  color: var(--copper);
+  font-size: 16px;
+  font-weight: bold;
+  margin-bottom: 12px;
+}
+
+.wall-post-input {
+  width: 100%;
+  background: var(--bg-deepest);
+  color: var(--text-primary);
+  border: 1px solid var(--copper);
+  border-radius: 4px;
+  padding: 8px;
+  font-family: inherit;
+  font-size: 14px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.wall-post-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  justify-content: flex-end;
+}
+
+.wall-post-actions button {
+  background: var(--copper);
+  color: #000;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: bold;
+}
+
+.wall-post-actions button.wall-post-cancel-btn {
+  background: transparent;
+  color: var(--copper);
+  border: 1px solid var(--copper);
+}
+
+/* a11y: screen-reader-only utility */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+/* ─── Focus Indicators ───────────────────────────────────────── */
+.card[role="button"]:focus-visible,
+.filter-btn:focus-visible,
+.tab:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--copper);
+  outline-offset: 2px;
+}
+
+.card[role="button"]:focus-visible {
+  box-shadow: 0 0 0 3px rgba(184, 115, 51, 0.3);
+}
+
+/* a11y: respect user motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  .v-goose-anim, .anim-smoke, .anim-flicker, .anim-fountain,
+  .anim-ripple, .anim-ripple-delay, .anim-swim-bob, .anim-wander,
+  .anim-farm-wander, .v-speech { animation: none !important; }
+}

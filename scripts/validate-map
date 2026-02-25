@@ -1,0 +1,710 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# ///
+"""Goosetown map validator — A* pathfinding, building inventory, water analysis."""
+
+from __future__ import annotations
+
+import argparse
+import heapq
+import os
+import sys
+from collections import defaultdict, deque
+from pathlib import Path
+from typing import NamedTuple
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+BUILDINGS: dict[str, dict] = {
+    "B": {"key": "barn",        "label": "Cozy Barn",          "roles": ["idle", "complete", "error"]},
+    "L": {"key": "library",     "label": "Grand Archive",      "roles": ["researcher"]},
+    "I": {"key": "inspector",   "label": "Inspector's Tower",  "roles": ["reviewer"]},
+    "F": {"key": "forge",       "label": "Steam Forge",        "roles": ["generic"]},
+    "C": {"key": "factory",     "label": "Cog Factory",        "roles": ["worker"]},
+    "H": {"key": "hall",        "label": "Town Hall",           "roles": ["orchestrator"]},
+    "W": {"key": "scriptorium", "label": "The Scriptorium",    "roles": ["writer"]},
+    "S": {"key": "apothecary",  "label": "Apothecary",         "roles": []},
+    "M": {"key": "market",      "label": "Market",             "roles": []},
+}
+BUILDING_CHARS = set(BUILDINGS.keys())
+ROLE_BEARING = {"L", "I", "F", "C", "H", "W"}
+
+DECORATION_CHARS = {"T": "pine", "O": "oak", "*": "bush", "R": "rock",
+                    "l": "lamp", "p": "pipes", "G": "gear"}
+
+WALK_SPEED = 4.0  # tiles/sec on cost-1 paths
+
+# ── ANSI helpers ─────────────────────────────────────────────────────────────
+
+USE_COLOR = sys.stdout.isatty()
+
+def _c(code: str, text: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if USE_COLOR else text
+
+def bold(t: str) -> str:   return _c("1", t)
+def dim(t: str) -> str:    return _c("2", t)
+def red(t: str) -> str:    return _c("31", t)
+def green(t: str) -> str:  return _c("32", t)
+def yellow(t: str) -> str: return _c("33", t)
+def cyan(t: str) -> str:   return _c("36", t)
+def mag(t: str) -> str:    return _c("35", t)
+
+def ok(msg: str) -> str:   return f"  {green('✅')} {msg}"
+def fail(msg: str) -> str: return f"  {red('❌')} {msg}"
+
+def header(title: str) -> str:
+    bar = "─" * 60
+    return f"\n{cyan(bar)}\n  {bold(title)}\n{cyan(bar)}"
+
+
+# ── Map parsing ──────────────────────────────────────────────────────────────
+
+def parse_map(path: str) -> list[list[str]]:
+    """Extract the ASCII grid from a map.js file or raw .txt file."""
+    text = Path(path).read_text()
+    if path.endswith(".js"):
+        parts = text.split("[Map]")
+        if len(parts) < 2:
+            sys.exit(f"Error: no [Map] section found in {path}")
+        raw = parts[1]
+        # Strip the closing backtick/template literal
+        raw = raw.split("`")[0]
+        lines = [l for l in raw.split("\n") if l.strip()]
+    else:
+        lines = [l for l in text.split("\n") if l.strip()]
+    return [list(line) for line in lines]
+
+
+# ── Cost model (faithful port from village.js) ──────────────────────────────
+
+def get_cost(char: str) -> float:
+    if char in (":", "+", "=") or char in BUILDING_CHARS:
+        return 1
+    if char == "#":
+        return 2
+    if char in (".", "A", "K"):
+        return 5
+    return float("inf")
+
+
+# ── A* pathfinding (faithful port from village.js) ──────────────────────────
+
+class PathResult(NamedTuple):
+    cost: float
+    path: list[tuple[int, int]]  # excludes start, includes end
+    crosses_bridge: bool
+
+
+def find_path(sx: int, sy: int, ex: int, ey: int,
+              grid: list[list[str]]) -> PathResult | None:
+    """A* with Manhattan heuristic, 4-directional. Returns None if unreachable."""
+    if not grid or not grid[0]:
+        return None
+    h = len(grid)
+    w = len(grid[0])
+
+    def heuristic(x: int, y: int) -> int:
+        return abs(x - ex) + abs(y - ey)
+
+    # (f, counter, x, y, g, parent_idx)
+    counter = 0
+    start = (heuristic(sx, sy), counter, sx, sy, 0.0, -1)
+    open_heap: list[tuple] = [start]
+    closed: set[tuple[int, int]] = set()
+    # Store nodes for path reconstruction
+    nodes: list[tuple] = [start]
+    best_g: dict[tuple[int, int], float] = {(sx, sy): 0.0}
+
+    DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+
+    while open_heap:
+        f, _, cx, cy, cg, parent_idx = heapq.heappop(open_heap)
+
+        if (cx, cy) in closed:
+            continue
+
+        if cx == ex and cy == ey:
+            # Reconstruct path (exclude start, include end — matches village.js)
+            path: list[tuple[int, int]] = []
+            idx = len(nodes) - 1
+            # Find the node we just popped — it's the last one with these coords
+            # Actually we need to find it properly
+            # Re-search: the node we popped is (f, _, cx, cy, cg, parent_idx)
+            # We stored it in nodes. Let's trace back.
+            cur_idx = -1
+            for i in range(len(nodes) - 1, -1, -1):
+                n = nodes[i]
+                if n[2] == cx and n[3] == cy and n[4] == cg:
+                    cur_idx = i
+                    break
+            bridge = False
+            while cur_idx >= 0:
+                nx, ny = nodes[cur_idx][2], nodes[cur_idx][3]
+                pi = nodes[cur_idx][5]
+                if pi >= 0:  # skip start node (matches village.js: if currNode.parent)
+                    path.append((nx, ny))
+                    if grid[ny][nx] == "=":
+                        bridge = True
+                cur_idx = pi
+            path.reverse()
+            return PathResult(cost=cg, path=path, crosses_bridge=bridge)
+
+        closed.add((cx, cy))
+
+        for dx, dy in DIRS:
+            nx, ny = cx + dx, cy + dy
+            if nx < 0 or ny < 0 or nx >= w or ny >= h:
+                continue
+            if (nx, ny) in closed:
+                continue
+            tile = grid[ny][nx]
+            c = get_cost(tile)
+            if c == float("inf"):
+                continue
+            ng = cg + c
+            prev = best_g.get((nx, ny), float("inf"))
+            if ng < prev:
+                best_g[(nx, ny)] = ng
+                counter += 1
+                nf = ng + heuristic(nx, ny)
+                node = (nf, counter, nx, ny, ng, len(nodes) - 1)
+                # parent_idx should point to current node
+                # Find current node index
+                cur_node_idx = -1
+                for i in range(len(nodes) - 1, -1, -1):
+                    if nodes[i][2] == cx and nodes[i][3] == cy and nodes[i][4] == cg:
+                        cur_node_idx = i
+                        break
+                node = (nf, counter, nx, ny, ng, cur_node_idx)
+                nodes.append(node)
+                heapq.heappush(open_heap, node)
+
+    return None
+
+
+# ── Flood fill ───────────────────────────────────────────────────────────────
+
+def flood_fill(grid: list[list[str]], start: tuple[int, int],
+               match_fn, visited: set[tuple[int, int]]) -> set[tuple[int, int]]:
+    """BFS flood fill returning all connected tiles matching match_fn."""
+    q = deque([start])
+    body: set[tuple[int, int]] = set()
+    h, w = len(grid), len(grid[0])
+    while q:
+        x, y = q.popleft()
+        if (x, y) in visited:
+            continue
+        if x < 0 or y < 0 or x >= w or y >= h:
+            continue
+        if not match_fn(grid[y][x]):
+            continue
+        visited.add((x, y))
+        body.add((x, y))
+        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+            q.append((x + dx, y + dy))
+    return body
+
+
+# ── Analysis functions ───────────────────────────────────────────────────────
+
+def building_inventory(grid: list[list[str]], verbose: bool) -> dict[str, tuple[int, int]]:
+    """Find all buildings on the grid. Returns {char: (x, y)}."""
+    print(header("Building Inventory"))
+    found: dict[str, tuple[int, int]] = {}
+    for y, row in enumerate(grid):
+        for x, ch in enumerate(row):
+            if ch in BUILDING_CHARS:
+                if ch in found:
+                    print(yellow(f"  ⚠ Duplicate building '{ch}' at ({x},{y}) — first at {found[ch]}"))
+                else:
+                    found[ch] = (x, y)
+
+    print(f"\n  {'Char':<6}{'Building':<22}{'Position':<14}{'Roles'}")
+    print(f"  {'─'*5} {'─'*21} {'─'*13} {'─'*20}")
+    for ch, info in BUILDINGS.items():
+        pos = found.get(ch)
+        roles = ", ".join(info["roles"]) if info["roles"] else dim("decorative")
+        if pos:
+            print(f"  {bold(ch):<{6 + (4 if USE_COLOR else 0)}} {info['label']:<22}{f'({pos[0]},{pos[1]})':<14}{roles}")
+        else:
+            print(f"  {red(ch):<{6 + (4 if USE_COLOR else 0)}} {info['label']:<22}{red('MISSING'):<{14 + (9 if USE_COLOR else 0)}}{roles}")
+
+    # Check for unknown characters
+    known = BUILDING_CHARS | set(DECORATION_CHARS.keys()) | set("#=:+.~%AKPD ")
+    unknowns: dict[str, int] = defaultdict(int)
+    for row in grid:
+        for ch in row:
+            if ch not in known:
+                unknowns[ch] += 1
+    if unknowns:
+        print(f"\n  {yellow('Unknown characters:')}")
+        for ch, cnt in sorted(unknowns.items()):
+            print(f"    '{ch}' × {cnt}")
+
+    missing = [ch for ch in BUILDINGS if ch not in found]
+    if missing:
+        print(f"\n  {red('Missing buildings:')} {', '.join(missing)}")
+    else:
+        print(f"\n  {green('All 9 buildings placed.')}")
+
+    return found
+
+
+def walk_times_from_barn(grid: list[list[str]], positions: dict[str, tuple[int, int]],
+                         verbose: bool) -> dict[str, PathResult | None]:
+    """A* from Barn to every other building."""
+    print(header("Walk Times from Barn"))
+
+    barn = positions.get("B")
+    if not barn:
+        print(red("  Barn (B) not found on map — cannot compute paths."))
+        return {}
+
+    results: dict[str, PathResult | None] = {}
+    print(f"\n  {'To':<6}{'Building':<22}{'Cost':>6}{'Time':>8}{'Manh':>6}{'Tiles':>7}{'Bridge':>8}")
+    print(f"  {'─'*5} {'─'*21} {'─'*5} {'─'*7} {'─'*5} {'─'*6} {'─'*7}")
+
+    for ch in sorted(BUILDINGS.keys()):
+        if ch == "B":
+            continue
+        pos = positions.get(ch)
+        if not pos:
+            print(f"  {bold(ch):<{6 + (4 if USE_COLOR else 0)}} {BUILDINGS[ch]['label']:<22}{red('NOT PLACED')}")
+            results[ch] = None
+            continue
+
+        result = find_path(barn[0], barn[1], pos[0], pos[1], grid)
+        results[ch] = result
+
+        manhattan = abs(pos[0] - barn[0]) + abs(pos[1] - barn[1])
+        if result is None:
+            print(f"  {bold(ch):<{6 + (4 if USE_COLOR else 0)}} {BUILDINGS[ch]['label']:<22}{red('UNREACHABLE')}")
+        else:
+            time_s = result.cost / WALK_SPEED
+            bridge = "🌉" if result.crosses_bridge else ""
+            time_str = f"{time_s:.1f}s"
+            role_flag = ""
+            if ch in ROLE_BEARING and time_s < 5.0:
+                role_flag = f" {yellow('⚠ <5s')}"
+            print(f"  {bold(ch):<{6 + (4 if USE_COLOR else 0)}} {BUILDINGS[ch]['label']:<22}"
+                  f"{result.cost:>6.0f}{time_str:>8}{manhattan:>6}{len(result.path):>7}  {bridge}{role_flag}")
+
+    return results
+
+
+def all_pairs_matrix(grid: list[list[str]], positions: dict[str, tuple[int, int]],
+                     verbose: bool) -> None:
+    """Walk time matrix between all building pairs."""
+    print(header("All-Pairs Walk Time Matrix (seconds)"))
+
+    chars = sorted(ch for ch in positions.keys())
+    if len(chars) < 2:
+        print(red("  Not enough buildings for a matrix."))
+        return
+
+    # Compute all pairs
+    times: dict[tuple[str, str], float | None] = {}
+    shortest_val = float("inf")
+    longest_val = 0.0
+    shortest_pair = ("", "")
+    longest_pair = ("", "")
+
+    for i, a in enumerate(chars):
+        for j, b in enumerate(chars):
+            if i >= j:
+                continue
+            ax, ay = positions[a]
+            bx, by = positions[b]
+            r = find_path(ax, ay, bx, by, grid)
+            if r:
+                t = r.cost / WALK_SPEED
+                times[(a, b)] = t
+                times[(b, a)] = t
+                if t < shortest_val:
+                    shortest_val, shortest_pair = t, (a, b)
+                if t > longest_val:
+                    longest_val, longest_pair = t, (a, b)
+            else:
+                times[(a, b)] = None
+                times[(b, a)] = None
+
+    # Print matrix
+    col_w = 6
+    hdr = "  " + " " * col_w
+    for ch in chars:
+        hdr += f"{ch:>{col_w}}"
+    print(f"\n{hdr}")
+
+    for a in chars:
+        row_str = f"  {bold(a):<{col_w + (4 if USE_COLOR else 0)}}"
+        for b in chars:
+            if a == b:
+                row_str += f"{'·':>{col_w}}"
+            else:
+                t = times.get((a, b))
+                if t is None:
+                    row_str += f"{red('✗'):>{col_w + (9 if USE_COLOR else 0)}}"
+                else:
+                    cell = f"{t:.1f}"
+                    if (a, b) == shortest_pair or (b, a) == shortest_pair:
+                        cell = green(cell)
+                        col_w_adj = col_w + 9 if USE_COLOR else col_w
+                    elif (a, b) == longest_pair or (b, a) == longest_pair:
+                        cell = mag(cell)
+                        col_w_adj = col_w + 9 if USE_COLOR else col_w
+                    else:
+                        col_w_adj = col_w
+                    row_str += f"{cell:>{col_w_adj}}"
+        print(row_str)
+
+    print(f"\n  {green('Shortest')}: {shortest_pair[0]}↔{shortest_pair[1]} = {shortest_val:.1f}s")
+    print(f"  {mag('Longest')}:  {longest_pair[0]}↔{longest_pair[1]} = {longest_val:.1f}s")
+
+
+def water_validation(grid: list[list[str]], verbose: bool) -> dict:
+    """Validate water bodies via flood fill."""
+    print(header("Water Body Validation"))
+
+    h = len(grid)
+    w = len(grid[0]) if grid else 0
+    visited: set[tuple[int, int]] = set()
+    bodies: list[set[tuple[int, int]]] = []
+
+    for y in range(h):
+        for x in range(w):
+            if grid[y][x] in ("~", "P") and (x, y) not in visited:
+                # Bridges (=) connect river segments — include them for contiguity
+                body = flood_fill(grid, (x, y), lambda ch: ch in ("~", "P", "="), visited)
+                if body:
+                    bodies.append(body)
+
+    # Separate water (~) and pond (P) bodies
+    water_bodies = []
+    pond_bodies = []
+    for body in bodies:
+        has_water = any(grid[y][x] == "~" for x, y in body)
+        has_pond = any(grid[y][x] == "P" for x, y in body)
+        if has_water and has_pond:
+            water_bodies.append(body)
+        elif has_water:
+            water_bodies.append(body)
+        else:
+            pond_bodies.append(body)
+
+    print(f"\n  Water bodies (~): {len(water_bodies)}")
+    for i, body in enumerate(water_bodies):
+        water_tiles = {(x, y) for x, y in body if grid[y][x] in ("~", "P")}
+        bridge_tiles = {(x, y) for x, y in body if grid[y][x] == "="}
+        ys = {y for _, y in body}
+        bridge_note = f" (+ {len(bridge_tiles)} bridge tiles)" if bridge_tiles else ""
+        print(f"    Body {i+1}: {len(water_tiles)} water tiles{bridge_note}, rows {min(ys)}-{max(ys)}")
+    print(f"  Pond bodies (P):  {len(pond_bodies)}")
+    for i, body in enumerate(pond_bodies):
+        print(f"    Pond {i+1}: {len(body)} tiles")
+
+    # River spans full height? (bridges connect river segments)
+    river_spans = False
+    for body in water_bodies:
+        ys = {y for _, y in body}  # includes bridge rows
+        if 0 in ys and (h - 1) in ys:
+            river_spans = True
+            break
+        if min(ys) == 0 and max(ys) == h - 1:
+            river_spans = True
+            break
+
+    if river_spans:
+        print(f"\n  {green('River spans full map height (top to bottom)')}")
+    else:
+        print(f"\n  {yellow('River does NOT span full map height')}")
+
+    # Isolated water tiles
+    isolated = [body for body in (water_bodies + pond_bodies) if len(body) == 1]
+    if isolated:
+        for body in isolated:
+            pos = list(body)[0]
+            print(f"  {yellow(f'Isolated water tile at ({pos[0]},{pos[1]})')}")
+    else:
+        print(f"  {green('No isolated water tiles')}")
+
+    return {
+        "water_bodies": water_bodies,
+        "pond_bodies": pond_bodies,
+        "river_spans": river_spans,
+        "isolated": isolated,
+    }
+
+
+def path_network(grid: list[list[str]], positions: dict[str, tuple[int, int]],
+                 verbose: bool) -> dict:
+    """Analyze the path network."""
+    print(header("Path Network Analysis"))
+
+    h = len(grid)
+    w = len(grid[0]) if grid else 0
+    total = h * w
+
+    walkable = 0
+    cost1_tiles = 0
+    cost2_tiles = 0
+    bridges: list[tuple[int, int]] = []
+    dead_ends: list[tuple[int, int]] = []
+
+    for y in range(h):
+        for x in range(w):
+            c = get_cost(grid[y][x])
+            if c < float("inf"):
+                walkable += 1
+            if c == 1:
+                cost1_tiles += 1
+            if c == 2:
+                cost2_tiles += 1
+            if grid[y][x] == "=":
+                bridges.append((x, y))
+
+    # Dead-end detection: cost<=2 tiles (path network) with only 1 cost<=2 neighbor
+    # Exclude building chars from dead-end check (they're destinations, not paths)
+    for y in range(h):
+        for x in range(w):
+            ch = grid[y][x]
+            if ch in BUILDING_CHARS:
+                continue
+            if get_cost(ch) > 2:
+                continue
+            neighbors = 0
+            for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < w and 0 <= ny < h and get_cost(grid[ny][nx]) <= 2:
+                    neighbors += 1
+            if neighbors == 1:
+                dead_ends.append((x, y))
+
+    paved_density = cost1_tiles / total * 100 if total else 0
+    dirt_density = cost2_tiles / total * 100 if total else 0
+
+    print(f"\n  Total tiles:        {total}")
+    print(f"  Walkable (cost<∞):  {walkable} ({walkable/total*100:.1f}%)")
+    print(f"  Cost-1 (paved):     {cost1_tiles} ({paved_density:.1f}%)")
+    print(f"  Cost-2 (dirt):      {cost2_tiles} ({dirt_density:.1f}%)")
+    print(f"  Bridge tiles (=):   {len(bridges)}")
+    if bridges and verbose:
+        for bx, by in bridges:
+            print(f"    ({bx},{by})")
+
+    # Connectivity: check all buildings are mutually reachable
+    building_chars = [ch for ch in sorted(positions.keys())]
+    connected = True
+    unreachable_pairs: list[tuple[str, str]] = []
+    if len(building_chars) >= 2:
+        ref = building_chars[0]
+        rx, ry = positions[ref]
+        for ch in building_chars[1:]:
+            px, py = positions[ch]
+            r = find_path(rx, ry, px, py, grid)
+            if r is None:
+                connected = False
+                unreachable_pairs.append((ref, ch))
+
+    if connected:
+        print(f"\n  {green('All buildings mutually reachable')}")
+    else:
+        print(f"\n  {red('Some buildings are NOT mutually reachable:')}")
+        for a, b in unreachable_pairs:
+            print(f"    {a} ↛ {b}")
+
+    print(f"\n  Dead-end path tiles: {len(dead_ends)}")
+    if dead_ends and verbose:
+        for dx, dy in dead_ends[:20]:
+            print(f"    ({dx},{dy}) = '{grid[dy][dx]}'")
+        if len(dead_ends) > 20:
+            print(f"    ... and {len(dead_ends) - 20} more")
+    elif dead_ends and not verbose:
+        print(f"    (use -v to see positions)")
+
+    return {
+        "total": total,
+        "walkable": walkable,
+        "cost1": cost1_tiles,
+        "cost2": cost2_tiles,
+        "paved_density": paved_density,
+        "dirt_density": dirt_density,
+        "bridges": bridges,
+        "connected": connected,
+        "dead_ends": dead_ends,
+    }
+
+
+def decoration_census(grid: list[list[str]], verbose: bool) -> None:
+    """Count decorations and their quadrant distribution."""
+    print(header("Decoration Census"))
+
+    h = len(grid)
+    w = len(grid[0]) if grid else 0
+    mid_x, mid_y = w // 2, h // 2
+
+    counts: dict[str, int] = defaultdict(int)
+    quads: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for y in range(h):
+        for x in range(w):
+            ch = grid[y][x]
+            if ch in DECORATION_CHARS:
+                counts[ch] += 1
+                qx = "W" if x < mid_x else "E"
+                qy = "N" if y < mid_y else "S"
+                quads[ch][qy + qx] += 1
+
+    total_deco = sum(counts.values())
+    print(f"\n  Total decorations: {total_deco}")
+    print(f"\n  {'Char':<6}{'Type':<10}{'Count':>7}{'NW':>6}{'NE':>6}{'SW':>6}{'SE':>6}")
+    print(f"  {'─'*5} {'─'*9} {'─'*6} {'─'*5} {'─'*5} {'─'*5} {'─'*5}")
+    for ch in sorted(DECORATION_CHARS.keys(), key=lambda c: -counts.get(c, 0)):
+        c = counts.get(ch, 0)
+        q = quads.get(ch, {})
+        print(f"  {bold(ch):<{6 + (4 if USE_COLOR else 0)}} {DECORATION_CHARS[ch]:<10}"
+              f"{c:>7}{q.get('NW',0):>6}{q.get('NE',0):>6}{q.get('SW',0):>6}{q.get('SE',0):>6}")
+
+
+def summary_verdict(grid: list[list[str]], positions: dict[str, tuple[int, int]],
+                    barn_results: dict[str, PathResult | None],
+                    water_info: dict, network_info: dict) -> bool:
+    """Print pass/fail summary. Returns True if all pass."""
+    print(header("Summary Verdict"))
+
+    h = len(grid)
+    checks: list[tuple[bool, str]] = []
+
+    # 1. All buildings placed
+    all_placed = all(ch in positions for ch in BUILDINGS)
+    checks.append((all_placed, "All buildings placed"))
+
+    # 2. All buildings reachable from Barn
+    all_reachable = all(r is not None for r in barn_results.values())
+    checks.append((all_reachable, "All buildings reachable from Barn"))
+
+    # 3. All buildings mutually reachable
+    checks.append((network_info["connected"], "All buildings mutually reachable"))
+
+    # 4. Minimum walk time >= 5.0s for role-bearing buildings
+    min_ok = True
+    for ch in ROLE_BEARING:
+        r = barn_results.get(ch)
+        if r and r.cost / WALK_SPEED < 5.0:
+            min_ok = False
+    checks.append((min_ok, "Minimum walk time ≥ 5.0s (role-bearing buildings)"))
+
+    # 5. River contiguous (spans full map height)
+    checks.append((water_info["river_spans"], "River contiguous (spans full map height)"))
+
+    # 6. No dead-end paths
+    no_dead_ends = len(network_info["dead_ends"]) == 0
+    checks.append((no_dead_ends, f"No dead-end paths ({len(network_info['dead_ends'])} found)"))
+
+    # 7. Grid dimensions consistent
+    widths = {len(row) for row in grid}
+    consistent = len(widths) == 1
+    checks.append((consistent, f"Grid dimensions consistent (all rows same length)"))
+
+    print()
+    all_pass = True
+    for passed, msg in checks:
+        print(ok(msg) if passed else fail(msg))
+        if not passed:
+            all_pass = False
+
+    if not consistent:
+        print(f"\n  {yellow('Row widths:')} {sorted(widths)}")
+        for i, row in enumerate(grid):
+            if len(row) != max(widths):
+                print(f"    Row {i}: {len(row)} chars (expected {max(widths)})")
+
+    print()
+    if all_pass:
+        print(f"  {bold(green('ALL CHECKS PASSED'))} 🦆")
+    else:
+        failed = sum(1 for p, _ in checks if not p)
+        print(f"  {bold(red(f'{failed} CHECK(S) FAILED'))}")
+
+    return all_pass
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Validate a Goosetown map — A* pathfinding, building inventory, water analysis.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+               "  ./scripts/validate-map                          # current map.js\n"
+               "  ./scripts/validate-map .scratch/map-grid.txt    # raw text file\n"
+               "  ./scripts/validate-map -v                       # verbose output\n",
+    )
+    parser.add_argument("map_file", nargs="?", default=None,
+                        help="Path to map file (.js or .txt). Default: ui/js/map.js")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Show extra detail (dead-end positions, bridge coords, etc.)")
+    args = parser.parse_args()
+
+    # Resolve map file path
+    if args.map_file:
+        map_path = args.map_file
+    else:
+        # Default: look for ui/js/map.js relative to script or cwd
+        candidates = [
+            Path("ui/js/map.js"),
+            Path(__file__).resolve().parent.parent / "ui" / "js" / "map.js",
+        ]
+        map_path = None
+        for c in candidates:
+            if c.exists():
+                map_path = str(c)
+                break
+        if not map_path:
+            sys.exit("Error: cannot find ui/js/map.js — pass a path explicitly.")
+
+    if not Path(map_path).exists():
+        sys.exit(f"Error: file not found: {map_path}")
+
+    print(bold(f"\n🗺️  Goosetown Map Validator"))
+    print(f"  Source: {map_path}\n")
+
+    # 1. Parse
+    grid = parse_map(map_path)
+    h = len(grid)
+    w = len(grid[0]) if grid else 0
+    widths = {len(row) for row in grid}
+    print(header("Grid Dimensions"))
+    print(f"\n  Rows: {h}")
+    print(f"  Cols: {w} (max)")
+    if len(widths) > 1:
+        print(f"  {yellow(f'WARNING: inconsistent row widths: {sorted(widths)}')}")
+    else:
+        print(f"  {green('All rows same width')}")
+
+    # 2. Building inventory
+    positions = building_inventory(grid, args.verbose)
+
+    # 3. Walk times from Barn
+    barn_results = walk_times_from_barn(grid, positions, args.verbose)
+
+    # 4. All-pairs matrix
+    all_pairs_matrix(grid, positions, args.verbose)
+
+    # 5. Water validation
+    water_info = water_validation(grid, args.verbose)
+
+    # 6. Path network
+    network_info = path_network(grid, positions, args.verbose)
+
+    # 7. Decoration census
+    decoration_census(grid, args.verbose)
+
+    # 8. Summary verdict
+    all_pass = summary_verdict(grid, positions, barn_results, water_info, network_info)
+
+    sys.exit(0 if all_pass else 1)
+
+
+if __name__ == "__main__":
+    main()
