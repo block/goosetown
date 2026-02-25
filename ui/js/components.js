@@ -132,7 +132,7 @@ function renderRegistry(st) {
         id: parentId,
         role: 'orchestrator',
         status: orch?.status || 'active',
-        tokens: orch?.accumulated_total_tokens || orch?.tokens || 0,
+        tokens: orch?.total_tokens || orch?.tokens || 0,
         message_count: orch?.message_count,
         elapsed_seconds: orch?.elapsed_seconds,
       }
@@ -469,7 +469,7 @@ function renderClockworks(st) {
       <span class="clockworks-divider">│</span>
       <span class="clockworks-stat">● ${active} active</span>
       <span class="clockworks-divider">│</span>
-      <span class="clockworks-stat">📊 ${formatTokens(tokens.accumulated_total || 0)} tok</span>
+      <span class="clockworks-stat">📊 ${formatTokens(tokens.current || 0)} ctx / ${formatTokens(tokens.accumulated_total || 0)} tot</span>
       <span class="clockworks-divider">│</span>
       <span class="clockworks-stat">📝 ${wall.rate_per_min || 0} msg/min</span>
       <span class="clockworks-divider">│</span>
