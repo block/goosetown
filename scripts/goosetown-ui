@@ -584,7 +584,8 @@ async def sessions_tree_watcher():
                         d["role"] = infer_role(d["id"], d.get("name", ""), parent_id)
                         d["gtwall_id"] = session_to_gtwall.get(d["id"]) or extract_gtwall_id(d.get("name", "")) or ""
                         d["status"] = infer_status(d, d["id"] in error_ids, now)
-                        d["tokens"] = d.get("accumulated_total_tokens", 0) or 0
+                        d["tokens"] = d.get("total_tokens", 0) or 0
+                        d["tokens_accumulated"] = d.get("accumulated_total_tokens", 0) or 0
                         created = 0.0
                         if d.get("created_at"):
                             try:
@@ -605,6 +606,7 @@ async def sessions_tree_watcher():
                 complete = sum(1 for c in children if c.get("status") == "complete")
                 error = sum(1 for c in children if c.get("status") == "error")
                 total_tokens = sum(c.get("tokens", 0) for c in children)
+                total_tokens_accumulated = sum(c.get("tokens_accumulated", 0) for c in children)
 
                 cutoff_ts = now - 60
                 rate = sum(1 for ln in latest_wall_lines if ln.get("_epoch", 0) > cutoff_ts)
@@ -612,7 +614,7 @@ async def sessions_tree_watcher():
                 stats = {
                     "wall": {"lines_total": len(latest_wall_lines), "rate_per_min": rate},
                     "sessions": {"active": active, "complete": complete, "error": error},
-                    "tokens": {"accumulated_total": total_tokens},
+                    "tokens": {"current": total_tokens, "accumulated_total": total_tokens_accumulated},
                 }
                 sh = json.dumps(stats, sort_keys=True)
                 if sh != prev_stats_hash:
