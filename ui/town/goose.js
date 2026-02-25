@@ -73,6 +73,7 @@ export class Goose {
     this.tokens = 0;
     this.messageCount = 0;
     this.sessionId = null;
+    this.carriedNote = null;
 
     // Assign home position on a ring (set by TownScene after construction)
     this.homePosition = new THREE.Vector3();
@@ -196,7 +197,27 @@ export class Goose {
     });
   }
 
+  leavePen(homePosition) {
+    if (!this.inPen) return;
+    this.inPen = false;
+    this.penBounds = null;
+    this.status = 'active';
+    this.homePosition.copy(homePosition);
+    this.targetPosition.copy(homePosition);
+    this.state = 'walking';
+    this._applyStatusTint();
+  }
+
   sendToPen(penCenter, penBounds) {
+    // If carrying a note, force-deliver it before retiring
+    if (this.carriedNote) {
+      if (this._onDeliverArrive) {
+        this._onDeliverArrive();
+        this._onDeliverArrive = null;
+      }
+      this.mesh.remove(this.carriedNote);
+      this.carriedNote = null;
+    }
     this.inPen = true;
     this.penBounds = penBounds;
     const x = penBounds.xMin + 0.5 + Math.random() * (penBounds.xMax - penBounds.xMin - 1);
@@ -207,12 +228,30 @@ export class Goose {
     this._pendingBoardAction = null;
   }
 
+  // Carry & deliver notes
+  carryNote(noteMesh) {
+    this.carriedNote = noteMesh;
+    noteMesh.position.set(0, 0.6, 0.2);
+    this.mesh.add(noteMesh);
+  }
+
+  goDeliverNote(deskPosition, onDeliver) {
+    if (this.state === 'delivering') return;
+    this.state = 'walking';
+    this._pendingBoardAction = 'delivering';
+    this._onDeliverArrive = onDeliver || null;
+    const offset = new THREE.Vector3(
+      (Math.random() - 0.5) * 0.6, 0, (Math.random() - 0.5) * 0.4 + 0.6
+    );
+    this.targetPosition.copy(deskPosition).add(offset);
+  }
+
   // Trigger animations
   goPost(onArrive) { this._goToBoard('posting', onArrive); }
   goRead() { this._goToBoard('reading'); }
 
   _goToBoard(actionState, onArrive) {
-    if (this.state === 'posting' || this.state === 'reading') return;
+    if (this.state === 'posting' || this.state === 'reading' || this.state === 'delivering') return;
     this.state = 'walking';
     this._pendingBoardAction = actionState;
     this._onBoardArrive = onArrive || null;
@@ -271,10 +310,12 @@ export class Goose {
       if (this.state === 'walking') {
         if (this._pendingBoardAction) {
           this.state = this._pendingBoardAction;
-          this._boardTimer = this.state === 'posting' ? 2.5 : 3.5;
-          // Face the board
-          const toBoard = this.boardPosition.clone().sub(this.mesh.position);
-          this.mesh.rotation.y = Math.atan2(toBoard.x, toBoard.z) + Math.PI;
+          this._boardTimer = this.state === 'posting' ? 2.5 : this.state === 'delivering' ? 1.5 : 3.5;
+          // Face toward the target (board or desk)
+          const toTarget = this.targetPosition.clone().sub(this.mesh.position);
+          if (toTarget.lengthSq() > 0.001) {
+            this.mesh.rotation.y = Math.atan2(toTarget.x, toTarget.z) + Math.PI;
+          }
           // Fire arrival callback (e.g. to render wall message)
           if (this._onBoardArrive) {
             this._onBoardArrive();
@@ -288,6 +329,22 @@ export class Goose {
 
     // Advance animation mixer (after play/stop decisions)
     if (this.mixer) this.mixer.update(dt);
+
+    // Delivering timer
+    if (this.state === 'delivering' && !moving) {
+      this._boardTimer -= dt;
+      if (this._boardTimer <= 0) {
+        if (this._onDeliverArrive) {
+          this._onDeliverArrive();
+          this._onDeliverArrive = null;
+        }
+        if (this.carriedNote) {
+          this.mesh.remove(this.carriedNote);
+          this.carriedNote = null;
+        }
+        this.goHome();
+      }
+    }
 
     // At-board timer
     if ((this.state === 'posting' || this.state === 'reading') && !moving) {
@@ -342,6 +399,10 @@ export class Goose {
   }
 
   dispose() {
+    if (this.carriedNote) {
+      this.mesh.remove(this.carriedNote);
+      this.carriedNote = null;
+    }
     this.scene.remove(this.mesh);
   }
 }

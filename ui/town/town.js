@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Goose } from './goose.js';
-import { openPanel, closePanel, refreshMessages, showWallForm, hideWallForm } from './panel.js';
+import { openPanel, closePanel, refreshMessages, showWallForm, hideWallForm, openFilePanel, closeFilePanel, openDeskBrowser, closeDeskBrowser } from './panel.js';
 
 // ── Scene setup ─────────────────────────────────────────────────────────
 const canvas = document.getElementById('town-canvas');
@@ -93,20 +93,47 @@ function updateBoardTexture(wallMsg) {
   redrawBoard();
 }
 
+function wrapText(ctx, text, maxWidth) {
+  const words = text.split(' ');
+  const lines = [];
+  let current = '';
+  for (const word of words) {
+    const test = current ? current + ' ' + word : word;
+    if (ctx.measureText(test).width > maxWidth && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = test;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
 function redrawBoard() {
   boardCtx.clearRect(0, 0, 720, 360);
   boardCtx.font = 'bold 18px monospace';
   boardCtx.fillStyle = '#1a0f00';
+  const maxWidth = 696; // 720 - 12px padding each side
+  const lineHeight = 18;
+  const msgGap = 8;
+  let y = 24;
   for (let i = 0; i < recentWallMessages.length; i++) {
     const m = recentWallMessages[i];
     const sender = m.sender_id || '???';
     const text = m.message || '';
     const line = `${sender}: ${text}`;
-    // Truncate for board width
-    boardCtx.fillText(line.slice(0, 56), 12, 30 + i * 54);
-    if (line.length > 56) {
-      boardCtx.fillText(line.slice(56, 112), 12, 48 + i * 54);
+    const wrapped = wrapText(boardCtx, line, maxWidth);
+    // Cap at 3 lines per message to keep space for others
+    const maxLines = 3;
+    for (let j = 0; j < Math.min(wrapped.length, maxLines); j++) {
+      let display = wrapped[j];
+      if (j === maxLines - 1 && wrapped.length > maxLines) display += '…';
+      boardCtx.fillText(display, 12, y);
+      y += lineHeight;
     }
+    y += msgGap;
+    if (y > 360) break;
   }
   boardTexture.needsUpdate = true;
 }
@@ -178,6 +205,153 @@ const signPost = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.9, 0.08), fenceMat
 signPost.position.set(0, 0.45, -7.9);
 scene.add(signPost);
 
+// ── Desk ─────────────────────────────────────────────────────────────────
+const deskPosition = new THREE.Vector3(5, 0.4, -2);
+const deskMat = new THREE.MeshLambertMaterial({ color: 0x3d2000 });
+
+// Table top
+const deskTop = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.08, 1.2), deskMat);
+deskTop.position.set(5, 0.8, -2);
+scene.add(deskTop);
+
+// 4 legs
+[[-0.85, -0.45], [0.85, -0.45], [-0.85, 0.45], [0.85, 0.45]].forEach(([dx, dz]) => {
+  const leg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.8, 0.08), deskMat);
+  leg.position.set(5 + dx, 0.4, -2 + dz);
+  scene.add(leg);
+});
+
+// "Documents" sign
+const docSignCanvas = document.createElement('canvas');
+docSignCanvas.width = 256; docSignCanvas.height = 64;
+const docSignCtx = docSignCanvas.getContext('2d');
+docSignCtx.fillStyle = '#f5e6c8';
+docSignCtx.fillRect(0, 0, 256, 64);
+docSignCtx.strokeStyle = '#3d2000';
+docSignCtx.lineWidth = 3;
+docSignCtx.strokeRect(2, 2, 252, 60);
+docSignCtx.font = 'bold 24px monospace';
+docSignCtx.fillStyle = '#3d2000';
+docSignCtx.textAlign = 'center';
+docSignCtx.fillText('Documents', 128, 42);
+const docSignTex = new THREE.CanvasTexture(docSignCanvas);
+const docSignMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.2, 0.3),
+  new THREE.MeshBasicMaterial({ map: docSignTex })
+);
+docSignMesh.position.set(5, 1.05, -1.38);
+scene.add(docSignMesh);
+
+// ── Notes on desk ────────────────────────────────────────────────────────
+const notes = new Map(); // path → { mesh, path, filename, stackIndex }
+let noteStackIndex = 0;
+
+function createNoteMesh(filename) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#f5f5f0';
+  ctx.fillRect(0, 0, 256, 128);
+  ctx.font = 'bold 14px monospace';
+  ctx.fillStyle = '#333';
+  ctx.textAlign = 'center';
+  // Truncate long filenames
+  const display = filename.length > 20 ? filename.slice(0, 18) + '..' : filename;
+  ctx.fillText(display, 128, 70);
+  const tex = new THREE.CanvasTexture(canvas);
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(0.35, 0.01, 0.45),
+    new THREE.MeshLambertMaterial({ map: tex, color: 0xf5f5f0 })
+  );
+  mesh.userData.isNote = true;
+  return mesh;
+}
+
+function addNoteToDesk(noteMesh, path, filename) {
+  const idx = noteStackIndex++;
+  noteMesh.position.set(
+    5 + (Math.random() - 0.5) * 0.6,
+    0.85 + idx * 0.015,
+    -2 + (Math.random() - 0.5) * 0.4
+  );
+  noteMesh.rotation.y = (Math.random() - 0.5) * 0.4;
+  scene.add(noteMesh);
+  notes.set(path, { mesh: noteMesh, path, filename, stackIndex: idx });
+  noteMesh.userData.filePath = path;
+  noteMesh.userData.fileName = filename;
+}
+
+function removeNote(path) {
+  const note = notes.get(path);
+  if (note) {
+    scene.remove(note.mesh);
+    notes.delete(path);
+  }
+}
+
+function clearAllNotes() {
+  notes.forEach(n => scene.remove(n.mesh));
+  notes.clear();
+  noteStackIndex = 0;
+}
+
+function onFileCreated(data) {
+  if (notes.has(data.path)) return;
+  const noteMesh = createNoteMesh(data.filename);
+  // Find creator goose or first active goose
+  const goose = geese.get(data.creator) || [...geese.values()].find(g => g.status === 'active');
+  if (goose && goose.state === 'idle') {
+    goose.carryNote(noteMesh);
+    goose.goDeliverNote(deskPosition, () => addNoteToDesk(noteMesh, data.path, data.filename));
+  } else {
+    addNoteToDesk(noteMesh, data.path, data.filename);
+  }
+}
+
+// ── Context menu ─────────────────────────────────────────────────────────
+const contextMenu = document.getElementById('context-menu');
+let contextTarget = null;
+
+function showContextMenu(x, y, note) {
+  contextTarget = note;
+  contextMenu.style.left = x + 'px';
+  contextMenu.style.top = y + 'px';
+  contextMenu.classList.remove('hidden');
+}
+
+function hideContextMenu() {
+  contextMenu.classList.add('hidden');
+  contextTarget = null;
+}
+
+contextMenu.addEventListener('click', async (e) => {
+  const action = e.target.dataset.action;
+  if (!action || !contextTarget) return;
+  const { filePath, fileName } = contextTarget;
+  if (action === 'open') {
+    openFilePanel(filePath, fileName);
+  } else if (action === 'delete') {
+    try {
+      await fetch(`/api/files/${encodeURIComponent(filePath)}`, { method: 'DELETE' });
+    } catch (_) {}
+  }
+  hideContextMenu();
+});
+
+document.addEventListener('click', () => hideContextMenu());
+
+renderer.domElement.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+  pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const noteMeshes = [...notes.values()].map(n => n.mesh);
+  const hits = raycaster.intersectObjects(noteMeshes);
+  if (hits.length > 0) {
+    showContextMenu(e.clientX, e.clientY, hits[0].object.userData);
+  }
+});
+
 // ── Goose management ────────────────────────────────────────────────────
 let launchRunning = false;  // true while the orchestrator OS process is alive
 const geese = new Map();  // gtwall_id → Goose
@@ -234,6 +408,16 @@ function onWall(wallMsg) {
   // on goose movement callbacks, which can be dropped during rapid posting.
   updateBoardTexture(wallMsg);
 
+  // If a human posted and the orchestrator is in the pen, revive it
+  if (wallMsg.sender_id === 'human') {
+    for (const [, goose] of geese) {
+      if (goose.role === 'orchestrator' && goose.inPen) {
+        goose.leavePen(new THREE.Vector3(0, 0.1, 0));
+        break;
+      }
+    }
+  }
+
   const goose = geese.get(wallMsg.sender_id);
   if (goose) {
     goose.goPost();
@@ -286,6 +470,14 @@ function connectSSE() {
           updateBoardTexture(line);
         }
       }
+      if (data.files) {
+        for (const f of data.files) {
+          if (!notes.has(f.path)) {
+            const mesh = createNoteMesh(f.filename);
+            addNoteToDesk(mesh, f.path, f.filename);
+          }
+        }
+      }
     } catch (err) { console.error('[Town] bootstrap error:', err); }
   });
 
@@ -310,6 +502,21 @@ function connectSSE() {
     } catch (_) {}
   });
 
+  es.addEventListener('file_created', (e) => {
+    try {
+      markSSEEvent();
+      onFileCreated(JSON.parse(e.data));
+    } catch (err) { console.error('[Town] file_created error:', err); }
+  });
+
+  es.addEventListener('file_deleted', (e) => {
+    try {
+      markSSEEvent();
+      const data = JSON.parse(e.data);
+      removeNote(data.path);
+    } catch (err) { console.error('[Town] file_deleted error:', err); }
+  });
+
   es.addEventListener('wall_reset', (e) => {
     try {
       markSSEEvent();
@@ -319,6 +526,7 @@ function connectSSE() {
       recentWallMessages.length = 0;
       seenWallKeys.clear();
       redrawBoard();
+      clearAllNotes();
       console.log('[Town] wall_reset — scene cleared for new launch');
     } catch (_) {}
   });
@@ -360,16 +568,30 @@ renderer.domElement.addEventListener('click', (e) => {
     }
   }
 
+  // Check desk area (desk top + any notes on it)
+  const deskTargets = [deskTop, ...[...notes.values()].map(n => n.mesh)];
+  const deskHits = raycaster.intersectObjects(deskTargets);
+  if (deskHits.length > 0) {
+    closePanel();
+    hideWallForm();
+    openDeskBrowser([...notes.values()].map(n => ({ path: n.path, filename: n.filename })));
+    return;
+  }
+
   // Check bulletin board (frame or face)
   const boardHits = raycaster.intersectObjects([frame, face, boardTextMesh]);
   if (boardHits.length > 0) {
     closePanel();
+    closeFilePanel();
+    closeDeskBrowser();
     showWallForm();
     return;
   }
 
   // Click on empty space — close everything
   closePanel();
+  closeFilePanel();
+  closeDeskBrowser();
   hideWallForm();
 });
 

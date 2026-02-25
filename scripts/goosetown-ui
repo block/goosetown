@@ -11,7 +11,7 @@ import uvicorn
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse, RedirectResponse, StreamingResponse
+from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -74,6 +74,8 @@ latest_tree: dict = {}
 latest_stats: dict = {}
 config: dict = {}
 wall_generation: int = 0  # bumped on launch to invalidate in-flight wall reads
+latest_files: dict[str, dict] = {}  # rel_path → {path, filename, size, mtime, creator}
+known_files: dict[str, float] = {}  # abs_path → mtime
 
 
 # ── DB ──────────────────────────────────────────────────────────────────────
@@ -570,7 +572,7 @@ async def sessions_tree_watcher():
                     ph = ",".join("?" * len(child_ids))
                     cur.execute(f"""
                         SELECT s.id, s.name, s.session_type, s.created_at, s.updated_at,
-                            s.accumulated_total_tokens,
+                            s.total_tokens, s.accumulated_total_tokens,
                             (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
                             (SELECT MAX(m.created_timestamp) FROM messages m WHERE m.session_id = s.id) AS last_message_ts
                         FROM sessions s WHERE s.id IN ({ph})
@@ -654,6 +656,69 @@ async def positions_watcher():
                 })
 
 
+def guess_creator() -> str:
+    """Best-guess creator: the most recently active child in the session tree."""
+    children = latest_tree.get("children", [])
+    best, best_ts = "", 0.0
+    for c in children:
+        if c.get("status") == "active":
+            ts = normalize_epoch(c.get("last_message_ts", 0))
+            if ts > best_ts:
+                best_ts = ts
+                best = c.get("gtwall_id") or c.get("name") or c.get("id", "")
+    return best or "unknown"
+
+
+async def file_watcher():
+    """Watch configured directories for new/modified files."""
+    while True:
+        await asyncio.sleep(1.0)
+        watch_dirs = config.get("watch_dirs", [".scratch"])
+        for rel_dir in watch_dirs:
+            abs_dir = os.path.join(PROJECT_DIR, rel_dir)
+            if not os.path.isdir(abs_dir):
+                continue
+            try:
+                entries = list(os.scandir(abs_dir))
+            except OSError:
+                continue
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue
+                mtime = st.st_mtime
+                abs_path = entry.path
+                if known_files.get(abs_path) == mtime:
+                    continue
+                is_new = abs_path not in known_files
+                known_files[abs_path] = mtime
+                rel_path = os.path.relpath(abs_path, PROJECT_DIR)
+                file_info = {
+                    "path": rel_path,
+                    "filename": entry.name,
+                    "size": st.st_size,
+                    "mtime": mtime,
+                    "creator": guess_creator() if is_new else latest_files.get(rel_path, {}).get("creator", "unknown"),
+                    "timestamp": time.time(),
+                }
+                latest_files[rel_path] = file_info
+                if is_new:
+                    publish_event("file_created", file_info)
+                    print(f"📄 file_watcher: new file {rel_path}", file=sys.stderr)
+                else:
+                    publish_event("file_modified", file_info)
+
+        # Remove tracked files that no longer exist
+        gone = [p for p in list(known_files) if not os.path.isfile(p)]
+        for p in gone:
+            rel_path = os.path.relpath(p, PROJECT_DIR)
+            known_files.pop(p, None)
+            latest_files.pop(rel_path, None)
+
+
 # ── SSE Endpoint ────────────────────────────────────────────────────────────
 async def sse_endpoint(request):
     if len(clients) > 50:
@@ -669,6 +734,7 @@ async def sse_endpoint(request):
                 "sessions": {"rows": latest_sessions},
                 "tree": latest_tree,
                 "stats": latest_stats,
+                "files": list(latest_files.values()),
             }, default=str)
             yield f"event: bootstrap\ndata: {bootstrap_data}\n\n"
 
@@ -774,6 +840,51 @@ async def wall_post_endpoint(request):
         return JSONResponse({"error": "internal error"}, status_code=500)
 
 
+def _validate_file_path(rel_path: str) -> str | None:
+    """Resolve rel_path within watched dirs. Returns abs path or None if invalid."""
+    watch_dirs = config.get("watch_dirs", [".scratch"])
+    resolved = os.path.realpath(os.path.join(PROJECT_DIR, rel_path))
+    for wd in watch_dirs:
+        abs_wd = os.path.realpath(os.path.join(PROJECT_DIR, wd))
+        if resolved.startswith(abs_wd + os.sep) or resolved == abs_wd:
+            return resolved
+    return None
+
+
+async def file_read_endpoint(request):
+    """Read file contents from a watched directory."""
+    rel_path = request.path_params["path"]
+    abs_path = _validate_file_path(rel_path)
+    if not abs_path:
+        return JSONResponse({"error": "path not in watched directories"}, status_code=403)
+    if not os.path.isfile(abs_path):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        return JSONResponse({"path": rel_path, "content": content, "size": os.path.getsize(abs_path)})
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def file_delete_endpoint(request):
+    """Delete a file in a watched directory."""
+    rel_path = request.path_params["path"]
+    abs_path = _validate_file_path(rel_path)
+    if not abs_path:
+        return JSONResponse({"error": "path not in watched directories"}, status_code=403)
+    if not os.path.isfile(abs_path):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        os.remove(abs_path)
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    known_files.pop(abs_path, None)
+    latest_files.pop(rel_path, None)
+    publish_event("file_deleted", {"path": rel_path, "timestamp": time.time()})
+    return JSONResponse({"ok": True})
+
+
 # ── Launch Control ────────────────────────────────────────────────────────
 launch_state: dict = {"acp": None, "wall_file": None, "started_at": None}
 launched_session_ids: list[str] = []  # sessions launched via /api/launch
@@ -818,6 +929,8 @@ async def launch_endpoint(request):
     global wall_generation
     wall_generation += 1
     latest_wall_lines.clear()
+    known_files.clear()
+    latest_files.clear()
     publish_event("wall_reset", {"wall_id": wall_id, "wall_file": wall_file})
 
     # Build env — inherit current env, set wall file for ./goose wrapper
@@ -952,6 +1065,8 @@ def create_app() -> Starlette:
             Route("/api/launch/stop", launch_stop_endpoint, methods=["POST"]),
             Route("/api/prompt", prompt_endpoint, methods=["POST"]),
             Route("/api/config", config_endpoint),
+            Route("/api/files/{path:path}", file_read_endpoint, methods=["GET"]),
+            Route("/api/files/{path:path}", file_delete_endpoint, methods=["DELETE"]),
             Mount("/ui/town", StaticFiles(directory=town_dir, html=True), name="town"),
             Mount("/ui", StaticFiles(directory=ui_dir), name="ui"),
         ],
@@ -964,6 +1079,7 @@ async def start_background_tasks():
     asyncio.create_task(wall_watcher())
     asyncio.create_task(sessions_tree_watcher())
     asyncio.create_task(positions_watcher())
+    asyncio.create_task(file_watcher())
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -992,6 +1108,7 @@ def main():
         "parent_session_id": parent_id,
         "wall_file": wall_file,
         "wall_id": wall_id,
+        "watch_dirs": [".scratch"],
         "db_path": DB_PATH,
         "port": args.port,
     })

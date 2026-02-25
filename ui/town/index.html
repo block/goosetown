@@ -34,6 +34,32 @@
     </footer>
   </aside>
 
+  <!-- File reader modal -->
+  <div id="file-modal" class="hidden">
+    <div id="file-modal-inner">
+      <header>
+        <span id="file-panel-name"></span>
+        <button id="file-panel-close">&times;</button>
+      </header>
+      <div id="file-panel-content"></div>
+    </div>
+  </div>
+
+  <!-- Desk browser panel -->
+  <aside id="desk-panel" class="panel hidden">
+    <header>
+      <span>Documents</span>
+      <button id="desk-panel-close">&times;</button>
+    </header>
+    <div id="desk-panel-content"></div>
+  </aside>
+
+  <!-- Context menu -->
+  <div id="context-menu" class="hidden">
+    <button data-action="open">Open</button>
+    <button data-action="delete">Delete</button>
+  </div>
+
   <!-- Bulletin board post form -->
   <div id="wall-post-form" class="hidden">
     <textarea id="wall-post-input" placeholder="Post to the wall..." maxlength="400"></textarea>

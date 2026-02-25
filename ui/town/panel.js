@@ -305,3 +305,83 @@ wallInput.addEventListener('keydown', (e) => {
     wallSubmit.click();
   }
 });
+
+// ── File Reader Panel ────────────────────────────────────────────────────
+
+const fileModal = document.getElementById('file-modal');
+const filePanelName = document.getElementById('file-panel-name');
+const filePanelContent = document.getElementById('file-panel-content');
+const filePanelClose = document.getElementById('file-panel-close');
+
+export async function openFilePanel(filePath, filename) {
+  filePanelName.textContent = filename;
+  filePanelContent.innerHTML = '<em class="panel-empty">Loading...</em>';
+  fileModal.classList.remove('hidden');
+
+  try {
+    const res = await fetch(`/api/files/${encodeURIComponent(filePath)}`);
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    const content = data.content || '';
+    if (filename.endsWith('.md')) {
+      filePanelContent.innerHTML = `<div class="file-content">${md(content)}</div>`;
+    } else {
+      filePanelContent.innerHTML = `<pre class="file-content-pre">${escapeHtml(content)}</pre>`;
+    }
+  } catch {
+    filePanelContent.innerHTML = '<em class="panel-empty">Failed to load file.</em>';
+  }
+}
+
+export function closeFilePanel() {
+  fileModal.classList.add('hidden');
+}
+
+filePanelClose.addEventListener('click', closeFilePanel);
+
+// Click backdrop to close
+fileModal.addEventListener('click', (e) => {
+  if (e.target === fileModal) closeFilePanel();
+});
+
+// ── Desk Browser Panel ────────────────────────────────────────────────
+
+const deskPanel = document.getElementById('desk-panel');
+const deskPanelContent = document.getElementById('desk-panel-content');
+const deskPanelClose = document.getElementById('desk-panel-close');
+
+export function openDeskBrowser(files) {
+  closeFilePanel();
+  if (!files.length) {
+    deskPanelContent.innerHTML = '<em class="panel-empty">No documents yet.</em>';
+  } else {
+    // Group by directory
+    const groups = {};
+    for (const f of files) {
+      const dir = f.path.includes('/') ? f.path.split('/').slice(0, -1).join('/') : '.';
+      (groups[dir] ||= []).push(f);
+    }
+    let html = '';
+    for (const [dir, items] of Object.entries(groups).sort()) {
+      html += `<div class="desk-group"><div class="desk-group-label">${escapeHtml(dir)}/</div>`;
+      for (const f of items) {
+        html += `<button class="desk-file-btn" data-path="${escapeHtml(f.path)}" data-name="${escapeHtml(f.filename)}">${escapeHtml(f.filename)}</button>`;
+      }
+      html += '</div>';
+    }
+    deskPanelContent.innerHTML = html;
+  }
+  deskPanel.classList.remove('hidden');
+}
+
+export function closeDeskBrowser() {
+  deskPanel.classList.add('hidden');
+}
+
+deskPanelClose.addEventListener('click', closeDeskBrowser);
+
+deskPanelContent.addEventListener('click', (e) => {
+  const btn = e.target.closest('.desk-file-btn');
+  if (!btn) return;
+  openFilePanel(btn.dataset.path, btn.dataset.name);
+});
