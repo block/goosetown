@@ -50,7 +50,7 @@ DB_PATH = os.path.expanduser("~/.local/share/goose/sessions/sessions.db")
 WALLS_DIR = os.path.expanduser("~/.goosetown/walls")
 CHILD_PATTERN = re.compile(r"Task (\d{8}_\d+) started in background")
 GTWALL_ID_PATTERN = re.compile(r"Your gtwall ID is (\S+)")
-DELEGATE_NAME_PATTERN = re.compile(r"You are (\S+)\.")
+DELEGATE_NAME_PATTERN = re.compile(r"You are (\S+)")
 # IMPORTANT: These patterns are duplicated in ui/js/buildings.js (inferRole function).
 # If you change patterns here, update the JS version to match.
 ROLE_PATTERNS = {
@@ -62,6 +62,7 @@ ROLE_PATTERNS = {
 }
 RING_BUFFER_SIZE = 10000
 WALL_LINE_MAX = 10000
+ACP_PROTOCOL_VERSION = "v1"
 
 # ── State ───────────────────────────────────────────────────────────────────
 event_buffer: deque = deque(maxlen=RING_BUFFER_SIZE)
@@ -72,6 +73,7 @@ latest_sessions: list[dict] = []
 latest_tree: dict = {}
 latest_stats: dict = {}
 config: dict = {}
+wall_generation: int = 0  # bumped on launch to invalidate in-flight wall reads
 
 
 # ── DB ──────────────────────────────────────────────────────────────────────
@@ -157,19 +159,45 @@ def wall_line_epoch(parsed: dict) -> float:
 
 
 # ── Tree Building ───────────────────────────────────────────────────────────
-def find_children(cur, parent_id: str) -> list[str]:
+def find_children(cur, parent_id: str, _seen: set | None = None) -> list[str]:
+    seen = _seen if _seen is not None else set()
+    children = []
+
+    # Find delegates spawned by this session (goose run style: "Task X started in background")
     cur.execute(
         "SELECT content_json FROM messages WHERE session_id = ? "
         "AND role = 'user' AND content_json LIKE '%started in background%'",
         (parent_id,),
     )
-    seen, children = set(), []
     for (content_json,) in cur:
         for m in CHILD_PATTERN.finditer(content_json):
             cid = m.group(1)
             if cid not in seen:
                 seen.add(cid)
                 children.append(cid)
+
+    # ACP-launched sessions: find sub_agent sessions created after the parent.
+    # Only applies to sessions launched via ACP (no "started in background" pattern).
+    if parent_id in launched_session_ids:
+        cur.execute(
+            "SELECT id FROM sessions WHERE session_type = 'sub_agent' "
+            "AND created_at >= (SELECT created_at FROM sessions WHERE id = ?) "
+            "ORDER BY created_at ASC",
+            (parent_id,),
+        )
+        for (cid,) in cur:
+            if cid not in seen:
+                seen.add(cid)
+                children.append(cid)
+
+    # Also find delegates of any UI-launched sessions (tracked in launched_session_ids)
+    if _seen is None:
+        for sid in launched_session_ids:
+            if sid not in seen:
+                seen.add(sid)
+                children.append(sid)
+                children.extend(find_children(cur, sid, seen))
+
     return children
 
 
@@ -273,6 +301,137 @@ def format_sse(eid: int, event: str, data) -> str:
     return f"id: {eid}\nevent: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+# ── ACP Client ─────────────────────────────────────────────────────────────
+class AcpClient:
+    """Async client for goose ACP (Agent Client Protocol) over stdio JSON-RPC 2.0."""
+
+    def __init__(self, goose_bin: str, env: dict, cwd: str):
+        self.goose_bin = goose_bin
+        self.env = env
+        self.cwd = cwd
+        self.process: asyncio.subprocess.Process | None = None
+        self.session_id: str | None = None
+        self._request_id = 0
+        self._read_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
+
+    async def start(self):
+        """Spawn goose acp and initialize the connection."""
+        # Log ACP stderr to a file for debugging
+        log_path = os.path.join(WALLS_DIR, f"acp-{os.getpid()}-{int(time.time())}.log")
+        os.makedirs(WALLS_DIR, exist_ok=True)
+        self._log_fh = open(log_path, "w")
+        print(f"📝 ACP stderr → {log_path}", file=sys.stderr)
+
+        self.process = await asyncio.create_subprocess_exec(
+            self.goose_bin, "acp",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=self._log_fh,
+            env=self.env,
+            cwd=self.cwd,
+        )
+        # Initialize handshake
+        resp = await self._request("initialize", {
+            "protocolVersion": ACP_PROTOCOL_VERSION,
+            "clientCapabilities": {},
+            "clientInfo": {"name": "goosetown-ui", "version": "1.0.0"},
+        })
+        if not resp or "result" not in resp:
+            raise RuntimeError(f"ACP initialize failed: {resp}")
+        caps = resp["result"].get("agentCapabilities", {})
+        print(f"🤝 ACP initialized (loadSession={caps.get('loadSession', False)})", file=sys.stderr)
+
+        # Create a new session
+        sess_resp = await self._request("session/new", {
+            "mcpServers": [],
+            "cwd": self.cwd,
+        })
+        if not sess_resp or "result" not in sess_resp:
+            raise RuntimeError(f"ACP session/new failed: {sess_resp}")
+        self.session_id = sess_resp["result"]["sessionId"]
+        print(f"📋 ACP session created: {self.session_id}", file=sys.stderr)
+
+    async def prompt(self, text: str):
+        """Send a prompt and stream back notifications. Returns the final response."""
+        if not self.session_id:
+            raise RuntimeError("ACP not initialized — call start() first")
+
+        self._request_id += 1
+        req_id = self._request_id
+        request = {
+            "jsonrpc": "2.0",
+            "method": "session/prompt",
+            "id": req_id,
+            "params": {
+                "sessionId": self.session_id,
+                "prompt": [{"type": "text", "text": text}],
+            },
+        }
+
+        async with self._write_lock:
+            self.process.stdin.write((json.dumps(request) + "\n").encode())
+            await self.process.stdin.drain()
+
+        # Read lines until we get our response (id match)
+        async with self._read_lock:
+            while True:
+                line = await self.process.stdout.readline()
+                if not line:
+                    return None
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                # Notification (no id) — publish to SSE
+                if "method" in msg and "id" not in msg:
+                    publish_event("acp_notification", msg.get("params", {}))
+                    continue
+
+                # Response matching our request
+                if msg.get("id") == req_id:
+                    return msg
+
+    async def _request(self, method: str, params: dict | None = None) -> dict | None:
+        """Send a simple request (non-streaming, no notification handling)."""
+        self._request_id += 1
+        req_id = self._request_id
+        request = {"jsonrpc": "2.0", "method": method, "id": req_id}
+        if params:
+            request["params"] = params
+
+        async with self._write_lock:
+            self.process.stdin.write((json.dumps(request) + "\n").encode())
+            await self.process.stdin.drain()
+
+        async with self._read_lock:
+            while True:
+                line = await self.process.stdout.readline()
+                if not line:
+                    return None
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if msg.get("id") == req_id:
+                    return msg
+
+    async def stop(self):
+        if self.process and self.process.returncode is None:
+            self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self.process.kill()
+        if hasattr(self, "_log_fh"):
+            self._log_fh.close()
+
+    @property
+    def alive(self) -> bool:
+        return self.process is not None and self.process.returncode is None
+
+
 # ── Background Tasks ───────────────────────────────────────────────────────
 async def wall_watcher():
     wall_path = config.get("wall_file")
@@ -282,11 +441,17 @@ async def wall_watcher():
 
     while True:
         await asyncio.sleep(0.5)
+
+        # Check if config changed (e.g. launch created a new wall file)
+        current = config.get("wall_file")
+        if current != wall_path:
+            print(f"📜 wall_watcher: tracking new file {current} (was {wall_path})", file=sys.stderr)
+            wall_path = current
+            offset = line_number = 0
+            partial = ""
+
         if not wall_path:
-            wall_path = find_wall_file()
-            config["wall_file"] = wall_path
-            if not wall_path:
-                continue
+            continue  # wait for launch to set a wall file
 
         try:
             st = os.stat(wall_path)
@@ -302,6 +467,12 @@ async def wall_watcher():
         if st.st_size == offset:
             continue
 
+        print(f"📜 wall_watcher: file changed, size={st.st_size} offset={offset} gen={wall_generation}", file=sys.stderr)
+
+        # Snapshot generation before reading — if it changes mid-read,
+        # a launch happened and these lines are stale
+        gen = wall_generation
+
         try:
             with open(wall_path, "r", encoding="utf-8", errors="replace") as f:
                 f.seek(offset)
@@ -315,6 +486,9 @@ async def wall_watcher():
         partial = lines.pop()
 
         for raw in lines:
+            if wall_generation != gen:
+                print(f"📜 wall_watcher: discarding stale line (gen {gen} != {wall_generation})", file=sys.stderr)
+                break
             raw = raw.strip()
             if not raw:
                 continue
@@ -324,6 +498,7 @@ async def wall_watcher():
             parsed["_epoch"] = wall_line_epoch(parsed)
             latest_wall_lines.append(parsed)
             publish_event("wall", parsed)
+            print(f"📜 wall_watcher: published line {line_number}: {raw[:80]}", file=sys.stderr)
 
 
 async def sessions_tree_watcher():
@@ -333,14 +508,29 @@ async def sessions_tree_watcher():
     prev_tree_hash = ""
     prev_stats_hash = ""
 
+    redetect_counter = 0
+
     while True:
         await asyncio.sleep(1.0)
-        if not parent_id:
-            parent_id = config.get("parent_session_id")
-            if not parent_id:
-                continue
         try:
             with db() as cur:
+                # Only auto-detect parent if we don't have one yet
+                # Re-sync parent_id from config (launch may have set it)
+                if config.get("parent_session_id") != parent_id:
+                    parent_id = config.get("parent_session_id")
+                    prev_tree_hash = ""
+                    prev_stats_hash = ""
+
+                if not parent_id:
+                    # Only auto-detect from launched sessions, not the entire DB
+                    if launched_session_ids:
+                        parent_id = launched_session_ids[0]
+                        config["parent_session_id"] = parent_id
+                        prev_tree_hash = ""
+                        prev_stats_hash = ""
+                        print(f"📋 Detected parent session: {parent_id}", file=sys.stderr)
+                if not parent_id:
+                    continue
                 # Sessions
                 cur.execute("""
                     SELECT id, name, session_type AS type, created_at, updated_at,
@@ -361,7 +551,17 @@ async def sessions_tree_watcher():
 
                 # Tree
                 child_ids = find_children(cur, parent_id)
+                # Merge in sessions launched via /api/launch
+                seen = set(child_ids)
+                for sid in launched_session_ids:
+                    if sid not in seen:
+                        child_ids.append(sid)
+                        seen.add(sid)
                 sender_map = build_sender_session_map(cur, parent_id)
+                # Merge launched gtwall names into the sender map
+                for sid, gname in launched_gtwall_map.items():
+                    if gname not in sender_map:
+                        sender_map[gname] = sid
                 session_to_gtwall = {sid: gid for gid, sid in sender_map.items()}
                 now = time.time()
                 children = []
@@ -422,6 +622,34 @@ async def sessions_tree_watcher():
 
         except Exception as e:
             print(f"⚠️  sessions_tree_watcher error: {e}", file=sys.stderr)
+
+
+async def positions_watcher():
+    """Watch .positions/ dir for mtime changes → emit wall_read events."""
+    known_mtimes: dict[str, float] = {}
+    while True:
+        await asyncio.sleep(0.5)
+        wall_path = config.get("wall_file")
+        if not wall_path:
+            continue
+        pos_dir = wall_path.removesuffix(".log") + ".positions"
+        if not os.path.isdir(pos_dir):
+            continue
+        for fname in os.listdir(pos_dir):
+            if not fname.endswith(".pos"):
+                continue
+            fpath = os.path.join(pos_dir, fname)
+            try:
+                mtime = os.path.getmtime(fpath)
+            except OSError:
+                continue
+            reader_id = fname[:-4]  # strip .pos
+            if known_mtimes.get(reader_id) != mtime:
+                known_mtimes[reader_id] = mtime
+                publish_event("wall_read", {
+                    "reader_id": reader_id,
+                    "timestamp": time.time(),
+                })
 
 
 # ── SSE Endpoint ────────────────────────────────────────────────────────────
@@ -531,12 +759,172 @@ async def wall_post_endpoint(request):
             stderr_output = (await proc.stderr.read()).decode().strip()
             print(f"⚠️  gtwall failed (rc={proc.returncode}): {stderr_output}", file=sys.stderr)
             return JSONResponse({"error": "failed to post message"}, status_code=500)
+
+        # Auto-prompt the ACP orchestrator to check the wall
+        acp: AcpClient | None = launch_state.get("acp")
+        if acp and acp.alive:
+            nudge = f"A human just posted on the wall: \"{message}\". Read the wall with ./gtwall goose-orchestrator and respond."
+            asyncio.create_task(_acp_prompt_task(acp, nudge))
+
         return JSONResponse({"ok": True})
     except Exception as e:
         print(f"⚠️  wall_post error: {e}", file=sys.stderr)
         return JSONResponse({"error": "internal error"}, status_code=500)
 
 
+# ── Launch Control ────────────────────────────────────────────────────────
+launch_state: dict = {"acp": None, "wall_file": None, "started_at": None}
+launched_session_ids: list[str] = []  # sessions launched via /api/launch
+launched_gtwall_map: dict[str, str] = {}  # session_id → gtwall display name
+
+
+async def launch_endpoint(request):
+    """Spawn a persistent goose orchestrator via ACP."""
+    acp: AcpClient | None = launch_state.get("acp")
+
+    # If an orchestrator is still running, retire it first
+    if acp and acp.alive:
+        publish_event("launch", {"status": "stopping", "pid": acp.process.pid})
+        print(f"🛑 Retiring old ACP orchestrator (pid={acp.process.pid})", file=sys.stderr)
+        await acp.stop()
+        launch_state["acp"] = None
+
+    # Fresh start — clear old launch tracking
+    launched_session_ids.clear()
+    launched_gtwall_map.clear()
+    config["parent_session_id"] = None
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+
+    prompt = body.get("prompt", "").strip()
+    if not prompt:
+        return JSONResponse({"error": "prompt required"}, status_code=400)
+
+    # Always create a fresh wall file for each launch
+    os.makedirs(WALLS_DIR, exist_ok=True)
+    wall_id = f"{os.getpid()}-{int(time.time())}"
+    wall_file = os.path.join(WALLS_DIR, f"wall-{wall_id}.log")
+    Path(wall_file).touch()
+    config["wall_file"] = wall_file
+    config["wall_id"] = wall_id
+
+    # Reset wall state so the UI starts fresh — bump generation to invalidate
+    # any in-flight wall_watcher reads from the old file
+    global wall_generation
+    wall_generation += 1
+    latest_wall_lines.clear()
+    publish_event("wall_reset", {"wall_id": wall_id, "wall_file": wall_file})
+
+    # Build env — inherit current env, set wall file for ./goose wrapper
+    env = os.environ.copy()
+    env["GOOSE_GTWALL_FILE"] = wall_file
+
+    # Use the real goose binary for ACP (not the ./goose wrapper which adds
+    # shell overhead and cleanup traps incompatible with stdio JSON-RPC)
+    goose_bin = os.environ.get("GOOSE_BIN") or "goose"
+
+    # Start ACP client
+    try:
+        acp = AcpClient(goose_bin, env, PROJECT_DIR)
+        await acp.start()
+    except Exception as e:
+        return JSONResponse({"error": f"ACP start failed: {e}"}, status_code=500)
+
+    launch_state.update(acp=acp, wall_file=wall_file, started_at=time.time())
+
+    # Track the ACP session so the tree watcher picks it up
+    launched_session_ids.append(acp.session_id)
+    launched_gtwall_map[acp.session_id] = "goose-orchestrator"
+    config["parent_session_id"] = acp.session_id
+
+    publish_event("launch", {"status": "started", "pid": acp.process.pid, "wall_file": wall_file, "session_id": acp.session_id})
+    print(f"🚀 ACP orchestrator started (pid={acp.process.pid}, session={acp.session_id}), wall={wall_file}", file=sys.stderr)
+
+    # Prepend identity context so the orchestrator knows its wall name
+    full_prompt = (
+        "You are goose-orchestrator. Your gtwall ID is goose-orchestrator. "
+        "Always use goose-orchestrator as your sender ID when posting to the wall.\n\n"
+        + prompt
+    )
+
+    # Send initial prompt in the background so we don't block the HTTP response
+    asyncio.create_task(_acp_prompt_task(acp, full_prompt))
+
+    return JSONResponse({"ok": True, "pid": acp.process.pid, "wall_file": wall_file, "wall_id": wall_id, "session_id": acp.session_id})
+
+
+async def _acp_prompt_task(acp: AcpClient, text: str):
+    """Run a prompt in the background, publishing notifications to SSE."""
+    try:
+        resp = await acp.prompt(text)
+        if resp and "error" in resp:
+            publish_event("acp_error", resp["error"])
+            print(f"⚠️  ACP prompt error: {resp['error']}", file=sys.stderr)
+        else:
+            publish_event("acp_complete", {"session_id": acp.session_id})
+    except Exception as e:
+        publish_event("acp_error", {"message": str(e)})
+        print(f"⚠️  ACP prompt exception: {e}", file=sys.stderr)
+
+
+async def prompt_endpoint(request):
+    """Send a follow-up message to the running ACP orchestrator."""
+    acp: AcpClient | None = launch_state.get("acp")
+    if not acp or not acp.alive:
+        return JSONResponse({"error": "no running orchestrator"}, status_code=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+
+    message = body.get("message", "").strip()
+    if not message:
+        return JSONResponse({"error": "message required"}, status_code=400)
+
+    asyncio.create_task(_acp_prompt_task(acp, message))
+    return JSONResponse({"ok": True, "session_id": acp.session_id})
+
+
+async def launch_status_endpoint(request):
+    """Return current launch state."""
+    acp: AcpClient | None = launch_state.get("acp")
+    if not acp:
+        return JSONResponse({"status": "idle"})
+
+    if acp.alive:
+        elapsed = round(time.time() - launch_state["started_at"]) if launch_state["started_at"] else 0
+        return JSONResponse({
+            "status": "running",
+            "pid": acp.process.pid,
+            "session_id": acp.session_id,
+            "wall_file": launch_state["wall_file"],
+            "elapsed_seconds": elapsed,
+        })
+    else:
+        return JSONResponse({
+            "status": "exited",
+            "pid": acp.process.pid,
+            "session_id": acp.session_id,
+            "exit_code": acp.process.returncode,
+            "wall_file": launch_state["wall_file"],
+        })
+
+
+async def launch_stop_endpoint(request):
+    """Stop the running ACP orchestrator."""
+    acp: AcpClient | None = launch_state.get("acp")
+    if not acp or not acp.alive:
+        return JSONResponse({"error": "no running orchestration"}, status_code=404)
+
+    pid = acp.process.pid
+    await acp.stop()
+    publish_event("launch", {"status": "stopping", "pid": pid})
+    print(f"🛑 Stopping ACP orchestrator (pid={pid})", file=sys.stderr)
+    return JSONResponse({"ok": True, "pid": pid})
 async def config_endpoint(request):
     safe_keys = ("wall_id", "port", "parent_session_id")
     return JSONResponse({k: config[k] for k in safe_keys if k in config})
@@ -549,13 +937,20 @@ async def root_redirect(request):
 # ── App ─────────────────────────────────────────────────────────────────────
 def create_app() -> Starlette:
     ui_dir = os.path.join(PROJECT_DIR, "ui")
+    town_dir = os.path.join(PROJECT_DIR, "ui", "town")
+    os.makedirs(town_dir, exist_ok=True)
     return Starlette(
         routes=[
             Route("/", root_redirect),
             Route("/events", sse_endpoint),
             Route("/api/messages/{session_id}", messages_endpoint),
             Route("/api/wall", wall_post_endpoint, methods=["POST"]),
+            Route("/api/launch", launch_endpoint, methods=["POST"]),
+            Route("/api/launch/status", launch_status_endpoint),
+            Route("/api/launch/stop", launch_stop_endpoint, methods=["POST"]),
+            Route("/api/prompt", prompt_endpoint, methods=["POST"]),
             Route("/api/config", config_endpoint),
+            Mount("/ui/town", StaticFiles(directory=town_dir, html=True), name="town"),
             Mount("/ui", StaticFiles(directory=ui_dir), name="ui"),
         ],
         middleware=[Middleware(SecurityHeadersMiddleware)],
@@ -566,6 +961,7 @@ def create_app() -> Starlette:
 async def start_background_tasks():
     asyncio.create_task(wall_watcher())
     asyncio.create_task(sessions_tree_watcher())
+    asyncio.create_task(positions_watcher())
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -576,23 +972,19 @@ def main():
     parser.add_argument("--wall", help="Wall file path (auto-detect if omitted)")
     args = parser.parse_args()
 
-    parent_id = args.session
-    if not parent_id:
-        try:
-            with db() as cur:
-                parent_id = find_parent_session(cur)
-        except Exception as e:
-            print(f"⚠️  Could not auto-detect session: {e}", file=sys.stderr)
-
-    print(f"📋 Parent session: {parent_id}" if parent_id else "⚠️  No parent session found — will retry in background", file=sys.stderr)
-
-    wall_file = args.wall or find_wall_file()
+    # Only use explicit --session/--wall args; otherwise start clean and wait for launch
+    parent_id = args.session or None
+    wall_file = args.wall or None
     wall_id = ""
+
+    if parent_id:
+        print(f"📋 Parent session: {parent_id}", file=sys.stderr)
     if wall_file:
         wall_id = Path(wall_file).stem.removeprefix("wall-")
         print(f"📜 Wall file: {wall_file}", file=sys.stderr)
-    else:
-        print("⚠️  No wall file found — will poll for it", file=sys.stderr)
+
+    if not parent_id and not wall_file:
+        print("🧹 Starting clean — use Launch Orchestrator to begin", file=sys.stderr)
 
     config.update({
         "parent_session_id": parent_id,
