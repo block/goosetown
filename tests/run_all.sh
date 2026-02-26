@@ -43,6 +43,15 @@ else
     ((++failures)) || true
 fi
 
+# goose wrapper tests (bash)
+echo ">>> goose wrapper tests"
+if bash tests/test_goose_wrapper.sh; then
+    echo ""
+else
+    echo "goose wrapper tests FAILED"
+    ((++failures)) || true
+fi
+
 # Final cleanup
 rm -f RESEARCH/_TEST_CATALOG_FIXTURE.md 2>/dev/null || true
 

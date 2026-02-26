@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Goosetown — Town View</title>
+  <link rel="stylesheet" href="town.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="town-canvas"></canvas>
+
+  <!-- Goose detail panel (slides in from right on click) -->
+  <aside id="goose-panel" class="panel hidden">
+    <header>
+      <span id="panel-name"></span>
+      <span id="panel-status-dot"></span>
+      <button id="panel-close">&times;</button>
+    </header>
+    <div class="tab-bar">
+      <button class="tab active" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="conversation">Conversation</button>
+      <button class="tab" data-tab="artifacts">Artifacts</button>
+    </div>
+    <div id="panel-content"></div>
+    <footer>
+      <button id="panel-send-to-wall">Send to wall</button>
+    </footer>
+  </aside>
+
+  <!-- File reader modal -->
+  <div id="file-modal" class="hidden">
+    <div id="file-modal-inner">
+      <header>
+        <span id="file-panel-name"></span>
+        <button id="file-panel-close">&times;</button>
+      </header>
+      <div id="file-panel-content"></div>
+    </div>
+  </div>
+
+  <!-- Desk browser panel -->
+  <aside id="desk-panel" class="panel hidden">
+    <header>
+      <span>Documents</span>
+      <button id="desk-panel-close">&times;</button>
+    </header>
+    <div id="desk-panel-content"></div>
+  </aside>
+
+  <!-- Context menu -->
+  <div id="context-menu" class="hidden">
+    <button data-action="open">Open</button>
+    <button data-action="delete">Delete</button>
+  </div>
+
+  <!-- Bulletin board post form -->
+  <div id="wall-post-form" class="hidden">
+    <textarea id="wall-post-input" placeholder="Post to the wall..." maxlength="400"></textarea>
+    <button id="wall-post-submit">Post</button>
+    <button id="wall-post-cancel">Cancel</button>
+  </div>
+
+  <!-- Launch control -->
+  <div id="launch-control">
+    <div id="launch-status-bar">
+      <span id="launch-status-text">Idle</span>
+      <button id="launch-stop-btn" class="hidden">Stop</button>
+    </div>
+    <button id="launch-open-btn">Launch Orchestrator</button>
+  </div>
+
+  <div id="launch-modal" class="hidden">
+    <div id="launch-modal-inner">
+      <h3>Launch Goose</h3>
+      <label for="launch-role">Role</label>
+      <input id="launch-role" type="text" placeholder="orchestrator" value="orchestrator">
+      <label for="launch-prompt">Prompt</label>
+      <textarea id="launch-prompt" placeholder="Describe the task..." rows="5"></textarea>
+      <label for="launch-instructions">Or instruction file path</label>
+      <input id="launch-instructions" type="text" placeholder="/path/to/instructions.md">
+      <div id="launch-modal-actions">
+        <button id="launch-go-btn">Launch</button>
+        <button id="launch-cancel-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dashboard link -->
+  <a href="/ui/index.html" id="dash-link">&larr; Dashboard</a>
+
+  <script type="module" src="town.js"></script>
+</body>
+</html>
