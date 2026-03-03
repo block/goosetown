@@ -34,6 +34,15 @@ else
     ((++failures)) || true
 fi
 
+# goosetown-ui tests (pytest)
+echo ">>> goosetown-ui tests"
+if uv run pytest tests/test_goosetown_ui.py -v; then
+    echo ""
+else
+    echo "goosetown-ui tests FAILED"
+    ((++failures)) || true
+fi
+
 # dashboard tests (bash)
 echo ">>> dashboard tests"
 if bash tests/test_dashboard.sh; then

@@ -20,6 +20,7 @@ Issues = "https://github.com/block/goosetown/issues"
 [tool.uv]
 dev-dependencies = [
     "pytest>=8.0",
+    "httpx>=0.27",
     "black>=24.0",
     "mypy>=1.14.0",
     "bandit>=1.8.0",
