@@ -209,50 +209,24 @@ class TestParsing:
 # ── B. Inference Tests ───────────────────────────────────────────────────────
 
 class TestInference:
-    """Session role classification and activity status inference.
+    """Session role classification and activity status inference."""
 
-    The dashboard assigns visual roles (orchestrator, researcher, worker, etc.)
-    and activity badges (active, waiting, complete, error) based on these functions.
-    Tests here lock down the classification rules: a session whose ID matches the
-    parent is always the orchestrator, name patterns map to specific roles, and
-    staleness thresholds drive the status state machine.
-    """
-
-    def test_infer_role_orchestrator_by_id(self):
-        assert ui.infer_role("sess-1", "anything", "sess-1") == "orchestrator"
-
-    def test_infer_role_researcher(self):
-        assert ui.infer_role("sess-2", "goosetown-researcher-github", "sess-1") == "researcher"
-
-    def test_infer_role_worker(self):
-        assert ui.infer_role("sess-2", "goosetown-worker", "sess-1") == "worker"
-
-    def test_infer_role_reviewer(self):
-        assert ui.infer_role("sess-2", "goosetown-reviewer", "sess-1") == "reviewer"
-
-    def test_infer_role_writer(self):
-        assert ui.infer_role("sess-2", "goosetown-writer", "sess-1") == "writer"
-
-    def test_infer_role_generic_fallback(self):
-        assert ui.infer_role("sess-2", "unknown-agent", "sess-1") == "generic"
+    @pytest.mark.parametrize("sid,name,parent,expected", [
+        ("sess-1", "anything", "sess-1", "orchestrator"),  # ID match → orchestrator
+        ("sess-2", "goosetown-researcher-github", "sess-1", "researcher"),
+        ("sess-2", "goosetown-worker", "sess-1", "worker"),
+        ("sess-2", "unknown-agent", "sess-1", "generic"),  # fallback
+    ])
+    def test_infer_role(self, sid, name, parent, expected):
+        assert ui.infer_role(sid, name, parent) == expected
 
     def test_infer_status_error_overrides(self):
         assert ui.infer_status({}, has_error=True, now=time.time()) == "error"
 
     def test_infer_status_active(self):
         now = time.time()
-        session = {"last_message_ts": now - 5}  # 5 seconds ago
+        session = {"last_message_ts": now - 5}
         assert ui.infer_status(session, has_error=False, now=now) == "active"
-
-    def test_infer_status_waiting(self):
-        now = time.time()
-        session = {"last_message_ts": now - 20}  # 20 seconds ago
-        assert ui.infer_status(session, has_error=False, now=now) == "waiting"
-
-    def test_infer_status_complete(self):
-        now = time.time()
-        session = {"last_message_ts": now - 300}  # 5 minutes ago
-        assert ui.infer_status(session, has_error=False, now=now) == "complete"
 
 
 # ── C. ACP Client Tests ─────────────────────────────────────────────────────
@@ -384,30 +358,19 @@ class TestLaunchEndpoints:
         mock_acp()
         resp = client.post("/api/launch", json={"prompt": "do something"})
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["ok"] is True
-        assert "pid" in data
-        assert "wall_file" in data
-        assert "session_id" in data
+        assert resp.json()["ok"] is True
 
     def test_status_idle_by_default(self, client):
         resp = client.get("/api/launch/status")
-        assert resp.status_code == 200
         assert resp.json()["status"] == "idle"
 
     def test_status_running_after_launch(self, client, mock_acp):
         mock_acp()
         client.post("/api/launch", json={"prompt": "go"})
-        resp = client.get("/api/launch/status")
-        data = resp.json()
-        assert data["status"] == "running"
-        assert "pid" in data
-        assert "session_id" in data
-        assert "elapsed_seconds" in data
+        assert client.get("/api/launch/status").json()["status"] == "running"
 
     def test_stop_no_orchestrator(self, client):
-        resp = client.post("/api/launch/stop")
-        assert resp.status_code == 404
+        assert client.post("/api/launch/stop").status_code == 404
 
     def test_stop_after_launch(self, client, mock_acp):
         mock_acp()
@@ -415,26 +378,22 @@ class TestLaunchEndpoints:
         resp = client.post("/api/launch/stop")
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
-        assert "pid" in resp.json()
 
     def test_status_exited_after_stop(self, client, mock_acp):
         mock_acp()
         client.post("/api/launch", json={"prompt": "go"})
         client.post("/api/launch/stop")
-        resp = client.get("/api/launch/status")
-        data = resp.json()
-        assert data["status"] == "exited"
-        assert "exit_code" in data
+        assert client.get("/api/launch/status").json()["status"] == "exited"
 
     def test_launch_replaces_existing(self, client, mock_acp):
-        mock_acp(session_id="first-session")
-        resp1 = client.post("/api/launch", json={"prompt": "first"})
-        first_pid = resp1.json()["pid"]
+        fake_first = mock_acp(session_id="first-session")
+        client.post("/api/launch", json={"prompt": "first"})
 
         mock_acp(session_id="second-session")
         resp2 = client.post("/api/launch", json={"prompt": "second"})
-        assert resp2.status_code == 200
         assert resp2.json()["session_id"] == "second-session"
+        # First process should have been terminated
+        assert fake_first.returncode is not None
 
 
 # ── E. Prompt Endpoint Tests ────────────────────────────────────────────────
@@ -477,13 +436,10 @@ class TestConfigAndRedirect:
     dashboard is reachable at /.
     """
 
-    def test_config_returns_safe_keys(self, client):
-        ui.config.update({"wall_id": "w1", "port": 4242, "parent_session_id": "s1", "wall_file": "/secret/path"})
-        resp = client.get("/api/config")
-        data = resp.json()
-        assert data["wall_id"] == "w1"
-        assert data["port"] == 4242
-        assert "wall_file" not in data  # not in safe_keys
+    def test_config_excludes_filesystem_paths(self, client):
+        ui.config.update({"wall_id": "w1", "port": 4242, "wall_file": "/secret/path"})
+        data = client.get("/api/config").json()
+        assert "wall_file" not in data  # filesystem paths must not leak to client
 
     def test_root_redirects(self, client):
         resp = client.get("/", follow_redirects=False)

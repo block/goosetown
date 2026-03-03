@@ -445,7 +445,11 @@ async def wall_watcher():
             partial = ""
 
         if not wall_path:
-            continue  # wait for launch to set a wall file
+            if not config.get("clean_mode"):
+                wall_path = find_wall_file()
+                if wall_path:
+                    config["wall_file"] = wall_path
+            continue
 
         try:
             st = os.stat(wall_path)
@@ -958,26 +962,45 @@ def main():
     parser.add_argument("--session", help="Parent session ID (auto-detect if omitted)")
     parser.add_argument("--port", type=int, default=4242, help="Port (default: 4242)")
     parser.add_argument("--wall", help="Wall file path (auto-detect if omitted)")
+    parser.add_argument("--clean", action="store_true",
+                        help="Start with no session/wall; use Launch Orchestrator to begin")
     args = parser.parse_args()
 
-    # Only use explicit --session/--wall args; otherwise start clean and wait for launch
-    parent_id = args.session or None
-    wall_file = args.wall or None
-    wall_id = ""
+    if args.clean:
+        # Clean mode: no auto-detect, wait for /api/launch to set wall + session
+        parent_id = args.session or None
+        wall_file = args.wall or None
+    else:
+        # Default: auto-detect session and wall file for backwards compatibility
+        parent_id = args.session
+        if not parent_id:
+            try:
+                with db() as cur:
+                    parent_id = find_parent_session(cur)
+            except Exception as e:
+                print(f"⚠️  Could not auto-detect session: {e}", file=sys.stderr)
 
+        wall_file = args.wall or find_wall_file()
+
+    wall_id = ""
     if parent_id:
         print(f"📋 Parent session: {parent_id}", file=sys.stderr)
+    else:
+        print("⚠️  No parent session found — will retry in background", file=sys.stderr)
+
     if wall_file:
         wall_id = Path(wall_file).stem.removeprefix("wall-")
         print(f"📜 Wall file: {wall_file}", file=sys.stderr)
-
-    if not parent_id and not wall_file:
+    elif args.clean:
         print("🧹 Starting clean — use Launch Orchestrator to begin", file=sys.stderr)
+    else:
+        print("⚠️  No wall file found — will poll for it", file=sys.stderr)
 
     config.update({
         "parent_session_id": parent_id,
         "wall_file": wall_file,
         "wall_id": wall_id,
+        "clean_mode": args.clean,
         "db_path": DB_PATH,
         "port": args.port,
     })
