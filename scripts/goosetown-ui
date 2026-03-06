@@ -312,8 +312,7 @@ class AcpClient:
         self.process: asyncio.subprocess.Process | None = None
         self.session_id: str | None = None
         self._request_id = 0
-        self._read_lock = asyncio.Lock()
-        self._write_lock = asyncio.Lock()
+        self._io_lock = asyncio.Lock()
 
     async def start(self):
         """Spawn goose acp and initialize the connection."""
@@ -366,11 +365,10 @@ class AcpClient:
             },
         }
 
-        async with self._write_lock:
+        async with self._io_lock:
             self.process.stdin.write((json.dumps(request) + "\n").encode())
             await self.process.stdin.drain()
 
-        async with self._read_lock:
             while True:
                 line = await self.process.stdout.readline()
                 if not line:
@@ -395,11 +393,10 @@ class AcpClient:
         if params:
             request["params"] = params
 
-        async with self._write_lock:
+        async with self._io_lock:
             self.process.stdin.write((json.dumps(request) + "\n").encode())
             await self.process.stdin.drain()
 
-        async with self._read_lock:
             while True:
                 line = await self.process.stdout.readline()
                 if not line:
@@ -850,7 +847,10 @@ async def _acp_prompt_task(acp: AcpClient, text: str):
     """Run a prompt in the background, publishing notifications to SSE."""
     try:
         resp = await acp.prompt(text)
-        if resp and "error" in resp:
+        if resp is None:
+            publish_event("acp_error", {"message": "ACP process exited before responding"})
+            print("⚠️  ACP prompt returned None (EOF — process likely crashed)", file=sys.stderr)
+        elif "error" in resp:
             publish_event("acp_error", resp["error"])
             print(f"⚠️  ACP prompt error: {resp['error']}", file=sys.stderr)
         else:
