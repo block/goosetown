@@ -396,7 +396,7 @@ async def sessions_tree_watcher():
                         children.append(d)
 
                 tree = {"parent_session_id": parent_id, "children": children, "sender_map": sender_map}
-                th = json.dumps([(c["id"], c.get("status"), c.get("tokens"), c.get("message_count")) for c in children])
+                th = json.dumps([(c["id"], c.get("status"), c.get("tokens"), c.get("tokens_current"), c.get("message_count")) for c in children])
                 if th != prev_tree_hash:
                     prev_tree_hash = th
                     latest_tree = tree
