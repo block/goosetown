@@ -370,7 +370,7 @@ async def sessions_tree_watcher():
                     ph = ",".join("?" * len(child_ids))
                     cur.execute(f"""
                         SELECT s.id, s.name, s.session_type, s.created_at, s.updated_at,
-                            s.accumulated_total_tokens,
+                            s.total_tokens, s.accumulated_total_tokens,
                             (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
                             (SELECT MAX(m.created_timestamp) FROM messages m WHERE m.session_id = s.id) AS last_message_ts
                         FROM sessions s WHERE s.id IN ({ph})
@@ -385,6 +385,7 @@ async def sessions_tree_watcher():
                         d["gtwall_id"] = session_to_gtwall.get(d["id"]) or extract_gtwall_id(d.get("name", "")) or ""
                         d["status"] = infer_status(d, d["id"] in error_ids, now)
                         d["tokens"] = d.get("accumulated_total_tokens", 0) or 0
+                        d["tokens_current"] = d.get("total_tokens", 0) or 0
                         created = 0.0
                         if d.get("created_at"):
                             try:
@@ -395,7 +396,7 @@ async def sessions_tree_watcher():
                         children.append(d)
 
                 tree = {"parent_session_id": parent_id, "children": children, "sender_map": sender_map}
-                th = json.dumps([(c["id"], c.get("status"), c.get("tokens"), c.get("message_count")) for c in children])
+                th = json.dumps([(c["id"], c.get("status"), c.get("tokens"), c.get("tokens_current"), c.get("message_count")) for c in children])
                 if th != prev_tree_hash:
                     prev_tree_hash = th
                     latest_tree = tree
@@ -405,6 +406,7 @@ async def sessions_tree_watcher():
                 complete = sum(1 for c in children if c.get("status") == "complete")
                 error = sum(1 for c in children if c.get("status") == "error")
                 total_tokens = sum(c.get("tokens", 0) for c in children)
+                total_tokens_current = sum(c.get("tokens_current", 0) for c in children)
 
                 cutoff_ts = now - 60
                 rate = sum(1 for ln in latest_wall_lines if ln.get("_epoch", 0) > cutoff_ts)
@@ -412,7 +414,7 @@ async def sessions_tree_watcher():
                 stats = {
                     "wall": {"lines_total": len(latest_wall_lines), "rate_per_min": rate},
                     "sessions": {"active": active, "complete": complete, "error": error},
-                    "tokens": {"accumulated_total": total_tokens},
+                    "tokens": {"accumulated_total": total_tokens, "current": total_tokens_current},
                 }
                 sh = json.dumps(stats, sort_keys=True)
                 if sh != prev_stats_hash:
