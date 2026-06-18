@@ -31,22 +31,77 @@ SCREEN_NAME="goosetown-ui-${WALL_ID}"
 PORTFILE="${WALLS_DIR}/dashboard-${WALL_ID}.port"
 
 # ── Session resolution ──────────────────────────────────────────────────────
+# True if the given session has delegate activity (a "started in background"
+# message), i.e. it looks like an orchestrator rather than a bare terminal/chat
+# session. Returns non-zero on empty input, no DB, or no delegate activity.
+session_has_delegates() {
+  local sid="$1"
+  [[ -n "$sid" ]] || return 1
+  command -v sqlite3 &>/dev/null && [[ -f "$DB_PATH" ]] || return 1
+  # Escape single quotes to keep the literal safe (session ids are YYYYMMDD_N).
+  local esc="${sid//\'/\'\'}"
+  local n
+  n=$(sqlite3 "$DB_PATH" "
+    SELECT COUNT(*) FROM messages
+    WHERE session_id = '$esc'
+      AND content_json LIKE '%started in background%';
+  " 2>/dev/null || echo 0)
+  [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]]
+}
+
 resolve_session() {
   local sid="${AGENT_SESSION_ID:-}"
 
-  if [[ -z "$sid" ]] && command -v sqlite3 &>/dev/null && [[ -f "$DB_PATH" ]]; then
-    # Prefer orchestrator session (has delegates)
-    sid=$(sqlite3 "$DB_PATH" "
-      SELECT DISTINCT s.id FROM sessions s
-      JOIN messages m ON m.session_id = s.id
-      WHERE s.session_type = 'user'
-        AND m.role = 'user'
-        AND m.content_json LIKE '%started in background%'
-        AND s.updated_at > datetime('now', '-24 hours')
-      ORDER BY s.updated_at DESC LIMIT 1;
-    " 2>/dev/null || true)
+  if command -v sqlite3 &>/dev/null && [[ -f "$DB_PATH" ]]; then
+    # Prefer the orchestrator bound to THIS instance's wall. Every goosetown on the
+    # machine shares one sessions.db with no instance/wall column, so without scoping
+    # we'd risk pinning a *different* instance's orchestrator. The wall is the per-
+    # instance anchor; an orchestrator launched with this wall records its path in its
+    # messages. WALL_ID is already sanitized to [A-Za-z0-9_-], so it's injection-safe.
+    # (goosetown-ui does the authoritative wall-scoped match; this is a best-effort hint.)
+    if [[ -n "${WALL_ID:-}" ]]; then
+      local wall_scoped
+      wall_scoped=$(sqlite3 "$DB_PATH" "
+        SELECT DISTINCT s.id FROM sessions s
+        JOIN messages m ON m.session_id = s.id
+        WHERE s.session_type = 'user'
+          AND m.role = 'user'
+          AND m.content_json LIKE '%started in background%'
+          AND s.updated_at > datetime('now', '-24 hours')
+          AND EXISTS (SELECT 1 FROM messages w
+                      WHERE w.session_id = s.id AND w.content_json LIKE '%${WALL_ID}%')
+        ORDER BY s.updated_at DESC LIMIT 1;
+      " 2>/dev/null || true)
+      [[ -n "$wall_scoped" ]] && sid="$wall_scoped"
+    fi
 
-    # Fallback: any recent user session
+    # Otherwise don't trust AGENT_SESSION_ID if it points at a session with no delegates
+    # (e.g. goose exports a *terminal* session id into shell subprocesses). Pinning such
+    # a session leaves the dashboard stuck on "Spawning delegates..." forever because
+    # find_children() never matches. Fall through to discovery instead.
+    if [[ -z "${wall_scoped:-}" && -n "$sid" ]] && ! session_has_delegates "$sid"; then
+      sid=""
+    fi
+
+    # Prefer the most recent orchestrator session (one that has delegates).
+    if [[ -z "$sid" ]]; then
+      sid=$(sqlite3 "$DB_PATH" "
+        SELECT DISTINCT s.id FROM sessions s
+        JOIN messages m ON m.session_id = s.id
+        WHERE s.session_type = 'user'
+          AND m.role = 'user'
+          AND m.content_json LIKE '%started in background%'
+          AND s.updated_at > datetime('now', '-24 hours')
+        ORDER BY s.updated_at DESC LIMIT 1;
+      " 2>/dev/null || true)
+    fi
+
+    # Fall back to AGENT_SESSION_ID even without delegate activity — covers a fresh
+    # orchestrator that hasn't spawned delegates yet (goosetown-ui self-heals the
+    # pin once delegates appear). Then to any recent user session.
+    if [[ -z "$sid" ]]; then
+      sid="${AGENT_SESSION_ID:-}"
+    fi
     if [[ -z "$sid" ]]; then
       sid=$(sqlite3 "$DB_PATH" "
         SELECT id FROM sessions WHERE session_type = 'user'

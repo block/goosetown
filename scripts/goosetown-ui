@@ -94,7 +94,24 @@ def normalize_epoch(ts) -> float:
 
 
 # ── Session Discovery ──────────────────────────────────────────────────────
-def find_parent_session(cur) -> str | None:
+def wall_sender_ids_from_file(wall_file: str | None) -> set[str]:
+    """IDs that have posted to a wall file (column 2 of each line)."""
+    if not wall_file or not os.path.isfile(wall_file):
+        return set()
+    senders: set[str] = set()
+    try:
+        with open(wall_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.split("|", 2)
+                if len(parts) >= 2 and parts[1].strip():
+                    senders.add(parts[1].strip())
+    except OSError:
+        pass
+    return senders
+
+
+def _orchestrator_candidates(cur) -> list[str]:
+    """User sessions with delegate activity in the last 24h, most recent first."""
     cur.execute("""
         SELECT DISTINCT s.id FROM sessions s
         JOIN messages m ON m.session_id = s.id
@@ -102,10 +119,39 @@ def find_parent_session(cur) -> str | None:
           AND m.role = 'user'
           AND m.content_json LIKE '%started in background%'
           AND s.updated_at > datetime('now', '-24 hours')
-        ORDER BY s.updated_at DESC LIMIT 1
+        ORDER BY s.updated_at DESC
     """)
-    if row := cur.fetchone():
-        return row[0]
+    return [row[0] for row in cur.fetchall()]
+
+
+def scoped_parent_session(cur, senders: set[str]) -> str | None:
+    """The orchestrator bound to THIS instance, found by matching the gtwall IDs it
+    spawned against the IDs that have posted to this instance's wall.
+
+    All goosetowns on a machine share one sessions.db, and sessions carry no
+    instance/wall identifier. The wall file is the per-instance anchor: matching its
+    senders to a candidate's spawned delegates is what stops concurrent instances from
+    resolving to each other's orchestrator. Picks the candidate with the most overlap
+    (ties → most recent); returns None if nothing matches this wall's senders.
+    """
+    if not senders:
+        return None
+    best, best_score = None, 0
+    for cid in _orchestrator_candidates(cur):
+        spawned = set(build_sender_session_map(cur, cid).keys())
+        score = len(spawned & senders)
+        if score > best_score:
+            best, best_score = cid, score
+    return best
+
+
+def find_parent_session(cur, wall_file: str | None = None) -> str | None:
+    # Prefer the orchestrator bound to THIS instance's wall (multi-instance safe).
+    if scoped := scoped_parent_session(cur, wall_sender_ids_from_file(wall_file)):
+        return scoped
+    # Fall back: most recent delegate-bearing user session, then any recent user session.
+    if candidates := _orchestrator_candidates(cur):
+        return candidates[0]
     cur.execute("SELECT id FROM sessions WHERE session_type = 'user' ORDER BY updated_at DESC LIMIT 1")
     return row[0] if (row := cur.fetchone()) else None
 
@@ -362,6 +408,31 @@ async def sessions_tree_watcher():
                 # Tree
                 child_ids = find_children(cur, parent_id)
                 sender_map = build_sender_session_map(cur, parent_id)
+
+                # Self-heal (multi-instance safe). Re-pin when the current parent has no
+                # delegates (e.g. AGENT_SESSION_ID pointed at a terminal session, or the
+                # dashboard launched before the orchestrator existed), OR when the current
+                # parent's delegates don't match the IDs posting to our wall — meaning we're
+                # pinned to a *different* concurrent goosetown's orchestrator. Re-resolution
+                # is scoped to THIS wall's senders, so we can only ever adopt our own
+                # instance, and only a candidate that actually has children (no thrashing).
+                wall_senders = {ln.get("sender_id", "") for ln in latest_wall_lines if ln.get("sender_id")}
+                parent_gtwall_ids = set(sender_map.keys())
+                wrong_instance = bool(wall_senders) and bool(parent_gtwall_ids) and not (parent_gtwall_ids & wall_senders)
+                if not child_ids or wrong_instance:
+                    candidate = scoped_parent_session(cur, wall_senders)
+                    if candidate and candidate != parent_id:
+                        candidate_children = find_children(cur, candidate)
+                        if candidate_children:
+                            print(
+                                f"🔄 Re-resolved parent session {parent_id} → {candidate} "
+                                f"({len(candidate_children)} delegate(s), wall-scoped)",
+                                file=sys.stderr,
+                            )
+                            parent_id = candidate
+                            config["parent_session_id"] = parent_id
+                            child_ids = candidate_children
+                            sender_map = build_sender_session_map(cur, parent_id)
                 session_to_gtwall = {sid: gid for gid, sid in sender_map.items()}
                 now = time.time()
                 children = []
@@ -577,16 +648,6 @@ def main():
     parser.add_argument("--wall", help="Wall file path (auto-detect if omitted)")
     args = parser.parse_args()
 
-    parent_id = args.session
-    if not parent_id:
-        try:
-            with db() as cur:
-                parent_id = find_parent_session(cur)
-        except Exception as e:
-            print(f"⚠️  Could not auto-detect session: {e}", file=sys.stderr)
-
-    print(f"📋 Parent session: {parent_id}" if parent_id else "⚠️  No parent session found — will retry in background", file=sys.stderr)
-
     wall_file = args.wall or find_wall_file()
     wall_id = ""
     if wall_file:
@@ -594,6 +655,22 @@ def main():
         print(f"📜 Wall file: {wall_file}", file=sys.stderr)
     else:
         print("⚠️  No wall file found — will poll for it", file=sys.stderr)
+
+    # Resolve the parent (orchestrator) session. Prefer the one bound to THIS instance's
+    # wall — it overrides an explicit --session, since the launcher may have passed a
+    # terminal or another instance's session id. Keep --session only when the wall can't
+    # yet identify an orchestrator (no delegates have posted), then fall back to discovery.
+    parent_id = args.session
+    try:
+        with db() as cur:
+            if scoped := scoped_parent_session(cur, wall_sender_ids_from_file(wall_file)):
+                parent_id = scoped
+            elif not parent_id:
+                parent_id = find_parent_session(cur, wall_file)
+    except Exception as e:
+        print(f"⚠️  Could not auto-detect session: {e}", file=sys.stderr)
+
+    print(f"📋 Parent session: {parent_id}" if parent_id else "⚠️  No parent session found — will retry in background", file=sys.stderr)
 
     config.update({
         "parent_session_id": parent_id,
