@@ -4,7 +4,7 @@
 import argparse, asyncio, glob, json, os, re, sqlite3, sys, time
 from collections import deque
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
@@ -84,6 +84,14 @@ def db():
         yield conn.cursor()
     finally:
         conn.close()
+
+
+def _utc_epoch(iso_str: str) -> float:
+    """Parse an ISO-format timestamp from SQLite as UTC and return epoch seconds."""
+    dt = datetime.fromisoformat(iso_str.replace(" ", "T"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def normalize_epoch(ts) -> float:
@@ -289,7 +297,7 @@ def infer_status(session: dict, has_error: bool, now: float) -> str:
     last = normalize_epoch(session.get("last_message_ts", 0))
     if not last and session.get("updated_at"):
         try:
-            last = datetime.fromisoformat(session["updated_at"].replace(" ", "T")).timestamp()
+            last = _utc_epoch(session["updated_at"])
         except (ValueError, AttributeError):
             pass
     elapsed = now - last if last else 999
@@ -459,7 +467,7 @@ async def sessions_tree_watcher():
                         created = 0.0
                         if d.get("created_at"):
                             try:
-                                created = datetime.fromisoformat(d["created_at"].replace(" ", "T")).timestamp()
+                                created = _utc_epoch(d["created_at"])
                             except (ValueError, AttributeError):
                                 pass
                         d["elapsed_seconds"] = round(now - created) if created else 0
